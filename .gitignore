@@ -7,3 +7,6 @@ dashboard_v2/data/crime.csv
 
 # macOS
 .DS_Store
+
+# IDE
+.vscode/
