@@ -4,3 +4,6 @@ dashboard_v2/data/crime.csv
 
 # General patterns for large files
 *.csv
+
+# macOS
+.DS_Store
