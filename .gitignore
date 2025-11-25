@@ -1,0 +1,6 @@
+# Large data files (>1GB)
+dashboard_v1/data/crime.csv
+dashboard_v2/data/crime.csv
+
+# General patterns for large files
+*.csv
