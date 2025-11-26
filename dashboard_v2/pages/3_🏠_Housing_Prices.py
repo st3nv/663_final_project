@@ -26,7 +26,7 @@ st.title("🏠 Housing Prices")
 st.markdown("Track home value changes across Chicago neighborhoods over time")
 
 # Sidebar settings
-# st.sidebar.header("📌 Chicago Dashboard")
+st.sidebar.header("📌 Dashboard")
 exclude_zips, exclude_2025 = get_exclude_settings()
 
 # Load data
@@ -123,7 +123,7 @@ if len(yearly_avg) > 0:
             st.metric(
                 "Best Year",
                 f"{best_year}",
-                f"{best_growth:+.1f}% growth"
+                f"{best_growth:+.1f}%"
             )
         with col_list[5]:
             worst_year = int(yoy_changes.idxmin())
@@ -142,7 +142,7 @@ if len(yearly_avg) > 0:
 st.markdown("---")
 
 
-components.html(html_code, height=840, scrolling=False)
+components.html(html_code, height=900, scrolling=False)
 
 # Additional info
 with st.expander("ℹ️ How to use"):

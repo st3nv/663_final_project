@@ -1,6 +1,7 @@
 # pages/2_🚨_Crime_Rate.py
 import streamlit as st
 import streamlit.components.v1 as components
+import pandas as pd
 import json
 import sys
 import os
@@ -16,6 +17,20 @@ from utils.map_generator import generate_map_html
 
 st.set_page_config(page_title="Crime Rate Map", page_icon="🚨", layout="wide")
 
+# Hide metric arrows only for the neighborhood metrics (second row of columns)
+st.write(
+    """
+    <style>
+    /* On this page the first four columns hold the summary metrics row.
+       The next two columns (5 and 6) hold the neighborhood metrics. */
+    div[data-testid="column"]:nth-of-type(n+5) [data-testid="stMetricDelta"] svg {
+        display: none;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Get selected ZIP from query params (set by map clicks)
 query_params = st.query_params
 selected_zip_from_url = query_params.get("selected_zip", None)
@@ -26,7 +41,7 @@ st.title("🚨 Crime Rate Analysis")
 st.markdown("Explore crime rates per 1,000 residents with animated timeline")
 
 # Sidebar settings
-st.sidebar.header("📌 Chicago Dashboard")
+st.sidebar.header("📌 Dashboard")
 exclude_zips, exclude_2025 = get_exclude_settings()
 
 # Load data
@@ -93,16 +108,12 @@ if len(yearly_rates) > 0:
         max_year = int(yearly_rates.idxmax())
         st.metric(
             "Peak Year",
-            f"{max_year}",
-            f"Rate: {yearly_rates.max():.2f}"
-        )
+            f"{max_year}"        )
     with col3:
         min_year_val = int(yearly_rates.idxmin())
         st.metric(
             "Lowest Year", 
-            f"{min_year_val}",
-            f"Rate: {yearly_rates.min():.2f}"
-        )
+            f"{min_year_val}"        )
     with col4:
         # Calculate trend
         first_years = yearly_rates.head(3).mean()
@@ -114,10 +125,82 @@ if len(yearly_rates) > 0:
             trend_label,
             f"{trend_pct:+.1f}%"
         )
+
+    # Only compute city-wide safest/most dangerous when no ZIP is selected
+    if not selected_zip:
+        latest_year = int(crime_df["year"].max())
+
+        # Aggregate crimes by ZIP for the latest year, only for ZIPs on the map
+        valid_zips = set(gdf_merged["ZIP"].astype(str))
+        crime_latest = (
+            crime_df[crime_df["year"] == latest_year]
+            .copy()
+        )
+        crime_latest["ZIP"] = crime_latest["ZIP"].astype(str)
+        crime_latest = crime_latest[crime_latest["ZIP"].isin(valid_zips)]
+
+        crime_by_zip = (
+            crime_latest.groupby("ZIP")["crime_count"]
+            .sum()
+            .reset_index()
+        )
+
+        pop_by_zip = (
+            pop_2021[["ZIP", "Population - Total"]]
+            .copy()
+        )
+        pop_by_zip["ZIP"] = pop_by_zip["ZIP"].astype(str)
+
+        rate_df = crime_by_zip.merge(pop_by_zip, on="ZIP", how="left")
+        rate_df = rate_df[rate_df["Population - Total"] > 0]
+        if len(rate_df) > 0:
+            rate_df["rate"] = (
+                rate_df["crime_count"] / rate_df["Population - Total"] * 1000
+            )
+
+            # Attach neighborhood names (ZipName) when available
+            if "ZipName" in gdf_merged.columns:
+                name_lookup = (
+                    gdf_merged[["ZIP", "ZipName"]]
+                    .drop_duplicates()
+                    .copy()
+                )
+                name_lookup["ZIP"] = name_lookup["ZIP"].astype(str)
+                rate_df = rate_df.merge(name_lookup, on="ZIP", how="left")
+
+            most_dangerous = rate_df.loc[rate_df["rate"].idxmax()]
+            safest = rate_df.loc[rate_df["rate"].idxmin()]
+
+            dangerous_label = (
+                f'{most_dangerous["ZipName"]}'
+                if "ZipName" in most_dangerous.index and pd.notna(most_dangerous["ZipName"])
+                else str(most_dangerous["ZIP"])
+            )
+            safest_label = (
+                f'{safest["ZipName"]}'
+                if "ZipName" in safest.index and pd.notna(safest["ZipName"])
+                else str(safest["ZIP"])
+            )
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.metric(
+                    "Most Dangerous Neighborhood",
+                    dangerous_label,
+                    f'{most_dangerous["rate"]:.2f} crimes per 1,000 residents ({latest_year})',
+                    delta_arrow="off"
+                )
+            with col_b:
+                st.metric(
+                    "Safest Neighborhood",
+                    safest_label,
+                    f'{safest["rate"]:.2f} crimes per 1,000 residents ({latest_year})',
+                    delta_arrow="off"
+                )
         
 st.markdown("---")
 
-components.html(html_code, height=840, scrolling=False)
+components.html(html_code, height=900, scrolling=False)
 
 
 # Additional info

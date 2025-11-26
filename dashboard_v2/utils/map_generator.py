@@ -262,7 +262,7 @@ def generate_map_html(map_data_json, map_type, crime_min_year, crime_max_year, z
             </div>
         </div>
         
-        <div class="click-instruction" id="clickInstruction">
+        <div class="click-instruction" id="clickInstruction" style="display: {'none' if map_type == 'Population' else 'block'};">
             👆 Click a ZIP code to view its trend below. Click outside to reset.
         </div>
     </div>
@@ -676,6 +676,7 @@ def generate_map_html(map_data_json, map_type, crime_min_year, crime_max_year, z
                 type: 'Feature',
                 properties: {{
                     zip: zip.zip,
+                    zipName: zip.zipName || '',
                     value: getValue(zip),
                     population: zip.population,
                     crimes: zip.crimes[currentYear.toString()] || 0,
@@ -767,7 +768,11 @@ def generate_map_html(map_data_json, map_type, crime_min_year, crime_max_year, z
                     }});
                     
                     // Tooltip
-                    let tooltipContent = `<b>ZIP: ${{props.zip}}</b><br>`;
+                    let tooltipContent = `<b>ZIP: ${{props.zip}}</b>`;
+                    if (props.zipName) {{
+                        tooltipContent += `<br><span>${{props.zipName}}</span>`;
+                    }}
+                    tooltipContent += '<br>';
                     if (mapType === 'Crime Rate') {{
                         tooltipContent += `Crime Rate: ${{crimeRate.toFixed(2)}} per 1000<br>`;
                         tooltipContent += `Total Crimes (${{currentYear}}): ${{props.crimes.toLocaleString()}}`;

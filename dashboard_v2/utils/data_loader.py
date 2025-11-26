@@ -100,6 +100,7 @@ def prepare_map_data(gdf, crime_df, zhvi_df, pop_2021):
     for _, row in gdf.iterrows():
         zip_code = row['ZIP']
         population = float(row['Population - Total'])
+        zip_name = row.get('ZipName', "")
         
         # Get crimes for all years
         crimes_all_years = {}
@@ -127,6 +128,7 @@ def prepare_map_data(gdf, crime_df, zhvi_df, pop_2021):
         
         map_data.append({
             'zip': zip_code,
+            'zipName': str(zip_name) if zip_name is not None else "",
             'population': population,
             'crimes': crimes_all_years,
             'zhvi': zhvi_all_years,
