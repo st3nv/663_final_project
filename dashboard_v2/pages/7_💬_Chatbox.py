@@ -20,7 +20,7 @@ from utils.data_loader import (
 
 st.set_page_config(page_title="Insight Chatbox", page_icon="💬", layout="wide")
 
-st.title("💬 Insight Chatbox")
+st.title("💬 Chatbox")
 st.markdown(
     "Chat with a simple assistant to explore how home values and crime relate across Chicago ZIP codes. "
     "The answers are grounded in the same data used in the other dashboard pages."

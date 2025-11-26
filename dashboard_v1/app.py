@@ -1283,10 +1283,10 @@ def render_adjacency_network():
 </script>
 </body>
 </html>
-"""
+    """
     html = (
-        html_template.replace("__NODES_DATA__", nodes_json)
-        .replace("__LINKS_DATA__", links_json)
+        html_template.replace("__NODES_DATA__", json.dumps(nodes_json))
+        .replace("__LINKS_DATA__", json.dumps(links_json))
     )
     components.html(html, height=640, scrolling=False)
 
@@ -1327,4 +1327,3 @@ elif view_mode == "Orbit View":
     render_orbit_view()
 elif view_mode == "Adjacency Network":
     render_adjacency_network()
-
