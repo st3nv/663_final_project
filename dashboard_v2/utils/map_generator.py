@@ -232,8 +232,13 @@ def generate_map_html(map_data_json, map_type, crime_min_year, crime_max_year, z
         <div id="map"></div>
         
         <div class="selected-zip-indicator" id="selectedIndicator" style="display: none;">
-            📍 ZIP: <span id="selectedZipDisplay">-</span>
-            <button class="clear-btn" id="clearSelectionBtn">✕</button>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    📍 ZIP: <span id="selectedZipDisplay">-</span>
+                </div>
+                <button class="clear-btn" id="clearSelectionBtn">✕</button>
+            </div>
+            <div id="selectedZipNameDisplay" style="margin-top: 2px; font-size: 12px; font-weight: normal;"></div>
         </div>
         
         <div class="controls" id="controls" style="display: {'block' if map_type != 'Population' else 'none'};">
@@ -321,8 +326,8 @@ def generate_map_html(map_data_json, map_type, crime_min_year, crime_max_year, z
         // Initialize map
         map = L.map('map', {{
             scrollWheelZoom: false,
-            doubleClickZoom: true,
-            touchZoom: true,
+            doubleClickZoom: false,
+            touchZoom: false,
             dragging: true,
             zoomControl: true,
             minZoom: 10,   // prevent zooming out too far
@@ -525,8 +530,13 @@ def generate_map_html(map_data_json, map_type, crime_min_year, crime_max_year, z
                         zipSeries = trendYears.map(year => zipData.zhvi[String(year)] || 0);
                     }}
 
+                    const displayName = zipData.zipName || '';
+                    const zipLabel = displayName
+                        ? `ZIP ${{zipCode}} - ${{displayName}}`
+                        : `ZIP ${{zipCode}}`;
+
                     datasets.push({{
-                        label: `ZIP ${{zipCode}}`,
+                        label: zipLabel,
                         data: zipSeries,
                         borderColor: '#ff6600',
                         backgroundColor: 'rgba(255,102,0,0.25)',
@@ -615,6 +625,10 @@ def generate_map_html(map_data_json, map_type, crime_min_year, crime_max_year, z
             clearAllHighlights();
             selectedZip = null;
             document.getElementById('selectedIndicator').style.display = 'none';
+            const nameEl = document.getElementById('selectedZipNameDisplay');
+            if (nameEl) {{
+                nameEl.textContent = '';
+            }}
             document.getElementById('clickInstruction').style.display = 'block';
             notifyStreamlit(null);
             updateTrendChartForZip(null);
@@ -757,6 +771,10 @@ def generate_map_html(map_data_json, map_type, crime_min_year, crime_max_year, z
                         
                         // Update UI
                         document.getElementById('selectedZipDisplay').textContent = zipCode;
+                        const nameEl = document.getElementById('selectedZipNameDisplay');
+                        if (nameEl) {{
+                            nameEl.textContent = props.zipName || '';
+                        }}
                         document.getElementById('selectedIndicator').style.display = 'block';
                         document.getElementById('clickInstruction').style.display = 'none';
                         
@@ -810,6 +828,11 @@ def generate_map_html(map_data_json, map_type, crime_min_year, crime_max_year, z
             if (selectedZip) {{
                 highlightZip(selectedZip);
                 document.getElementById('selectedZipDisplay').textContent = selectedZip;
+                const selectedMeta = mapData.find(z => String(z.zip) === String(selectedZip));
+                const nameEl = document.getElementById('selectedZipNameDisplay');
+                if (nameEl && selectedMeta) {{
+                    nameEl.textContent = selectedMeta.zipName || '';
+                }}
                 document.getElementById('selectedIndicator').style.display = 'block';
                 document.getElementById('clickInstruction').style.display = 'none';
             }}
