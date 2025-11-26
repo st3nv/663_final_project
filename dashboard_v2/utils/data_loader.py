@@ -62,7 +62,7 @@ def get_exclude_settings():
             st.caption("📍 Showing all ZIP codes")
 
         exclude_2025 = st.checkbox(
-            "Exclude year 2025 data (if present)",
+            "Exclude year 2025",
             value=True,
             help="When checked, any 2025 values are removed from maps and trend charts."
         )
