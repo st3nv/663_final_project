@@ -1013,33 +1013,61 @@ def render_bar_chart_race():
         ["Home Value (ZHVI)", "Crime Rate"],
     )
 
+    # Build a readable ZIP label (ZIP + ZipName when available)
+    if "ZipName" in zip_df.columns:
+        name_map = (
+            zip_df[["ZIP", "ZipName"]]
+            .drop_duplicates()
+            .set_index("ZIP")["ZipName"]
+            .to_dict()
+        )
+    else:
+        name_map = {}
+
     if race_type == "Home Value (ZHVI)":
         df = race_zhvi_df.copy()
         df = df[df["Zhvi"] > 0]
+        if not df.empty:
+            df["ZipLabel"] = df["ZIP"].apply(
+                lambda z: f"{z} – {name_map.get(z, '')}" if name_map.get(z, "") else z
+            )
+            # Sort within each year so rankings move over time
+            df = df.sort_values(["Year", "Zhvi"])
         st.caption("房价随时间的排名变化 · ZHVI bar chart race")
         fig = px.bar(
             df,
             x="Zhvi",
-            y="ZIP",
+            y="ZipLabel",
             color="ZIP",
             orientation="h",
             animation_frame="Year",
             range_x=[0, df["Zhvi"].max() * 1.1],
-            labels={"Zhvi": "Average Home Value (USD)", "ZIP": "ZIP Code"},
+            labels={
+                "Zhvi": "Average Home Value (USD)",
+                "ZipLabel": "ZIP & Neighborhood",
+            },
             title="Home Value Race · 房价排名赛跑",
         )
     else:
         df = race_crime_df.copy()
+        if not df.empty:
+            df["ZipLabel"] = df["ZIP"].apply(
+                lambda z: f"{z} – {name_map.get(z, '')}" if name_map.get(z, "") else z
+            )
+            df = df.sort_values(["Year", "CrimeRate"])
         st.caption("犯罪率随时间的排名变化 · Crime Rate bar chart race")
         fig = px.bar(
             df,
             x="CrimeRate",
-            y="ZIP",
+            y="ZipLabel",
             color="ZIP",
             orientation="h",
             animation_frame="Year",
             range_x=[0, df["CrimeRate"].max() * 1.1],
-            labels={"CrimeRate": "Crime Rate (per 1000 residents)", "ZIP": "ZIP Code"},
+            labels={
+                "CrimeRate": "Crime Rate (per 1000 residents)",
+                "ZipLabel": "ZIP & Neighborhood",
+            },
             title="Crime Rate Race · 犯罪率排名赛跑",
         )
 
@@ -1047,6 +1075,12 @@ def render_bar_chart_race():
         template="simple_white",
         height=620,
         margin=dict(l=80, r=40, t=60, b=40),
+        xaxis=dict(
+            showgrid=True,
+            gridcolor="rgba(148,163,184,0.35)",
+            gridwidth=1,
+        ),
+        yaxis=dict(categoryorder="category ascending"),
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1293,5 +1327,4 @@ elif view_mode == "Orbit View":
     render_orbit_view()
 elif view_mode == "Adjacency Network":
     render_adjacency_network()
-
 

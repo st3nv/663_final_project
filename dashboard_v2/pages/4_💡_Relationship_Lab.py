@@ -21,7 +21,7 @@ from utils.data_loader import (
     prepare_map_data,
 )
 
-st.set_page_config(page_title="Insight 1 · Relationship Lab", page_icon="💡", layout="wide")
+st.set_page_config(page_title="Relationship Lab", page_icon="💡", layout="wide")
 
 st.title("💡 Relationship Lab")
 st.markdown(
@@ -160,7 +160,7 @@ tabs = st.tabs(
 
 
 with tabs[0]:
-    st.subheader(f"💙 Most recent Value vs Safety - {crime_max_year}")
+    st.subheader(f":material/query_stats: Most recent Value vs Safety - {crime_max_year}")
     st.markdown(
         "This view uses the most recent year of data to compare each ZIP's home values to its crime rate using a simple regression line. "
         "ZIPs above or below the line appear over- or under-valued given their crime levels."
@@ -273,7 +273,7 @@ with tabs[0]:
         )
 
 with tabs[1]:
-    st.subheader("💙 Value vs Safety Animated")
+    st.subheader(":material/query_stats: Value vs Safety Animated")
     st.markdown(
         "This animated view shows how each ZIP's home values and crime rates move together over time. "
         "Use play, pause, or drag the year slider to see the relationship evolve."
@@ -1283,11 +1283,12 @@ with tabs[3]:
             position: absolute;
             bottom: 20px;
             right: 10px;
-            background: white;
+            background: rgba(255, 255, 255, 0.96);
             padding: 10px 12px;
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.2);
             font-size: 12px;
+            z-index: 1000;
         }}
         .legend-title {{
             font-weight: bold;

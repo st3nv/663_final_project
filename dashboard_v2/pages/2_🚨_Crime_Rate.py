@@ -186,20 +186,3 @@ st.markdown("---")
 
 components.html(html_code, height=900, scrolling=False)
 
-
-# Additional info
-with st.expander("ℹ️ How to use"):
-    st.markdown(f"""
-    **Interactive Map:**
-    - **Click on a ZIP code** on the map to select it - the chart below will update automatically
-    - **Click outside Chicago** (on the gray area) to reset to overall view
-    - Use the **Play** button to animate through years ({crime_min_year}–{crime_max_year})
-    - Drag the **slider** to jump to a specific year
-    
-    **Trend Chart:**
-    - Shows crime rate changes over time as a filled step chart
-    - When a ZIP is selected, it is automatically compared against the Chicago average
-    - Hover over points for exact values
-    
-    **Data:** {crime_min_year}–{crime_max_year} | {len(gdf_merged)} ZIP codes
-    """)

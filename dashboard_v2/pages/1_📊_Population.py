@@ -154,14 +154,3 @@ top10_chart = (
     .properties(height=chart_height)
 )
 st.altair_chart(top10_chart, use_container_width=True)
-
-# Additional info
-with st.expander("ℹ️ How to use"):
-    st.markdown("""
-    **Interactive Map:**
-    
-    This map shows the population distribution across Chicago ZIP codes based on 2021 Census data.
-    - Click on any ZIP code to see detailed population information
-    - Use the settings in the sidebar to exclude specific ZIP codes
-    - Darker colors indicate higher population density
-    """)

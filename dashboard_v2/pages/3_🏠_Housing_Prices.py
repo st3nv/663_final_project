@@ -4,6 +4,8 @@ import streamlit.components.v1 as components
 import json
 import sys
 import os
+import pandas as pd
+import plotly.express as px
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,6 +49,29 @@ map_data, gdf_merged, crime_min_year, crime_max_year, zhvi_min_year, zhvi_max_ye
     gdf, crime_df, zhvi_df, pop_2021
 )
 map_data_json = json.dumps(map_data)
+
+# Prepare bar chart race data (reuses map_data like v1 dashboard)
+race_zhvi_records = []
+race_crime_records = []
+for z in map_data:
+    # Home value race (ZHVI)
+    for y_str, val in z["zhvi"].items():
+        year = int(y_str)
+        if val <= 0:
+            continue
+        race_zhvi_records.append({"ZIP": z["zip"], "Year": year, "Zhvi": val})
+
+    # Crime rate race (per 1,000 residents)
+    pop_val = float(z.get("population", 0.0) or 0.0)
+    for y_str, crimes in z["crimes"].items():
+        year = int(y_str)
+        rate = crimes / pop_val * 1000.0 if pop_val > 0 else 0.0
+        race_crime_records.append(
+            {"ZIP": z["zip"], "Year": year, "CrimeRate": rate}
+        )
+
+race_zhvi_df = pd.DataFrame(race_zhvi_records)
+race_crime_df = pd.DataFrame(race_crime_records)
 
 # Get available ZIP codes (only those with housing data)
 zips_with_data = set(zhvi_df['RegionName'].astype(str).unique())
@@ -144,21 +169,68 @@ st.markdown("---")
 
 components.html(html_code, height=900, scrolling=False)
 
-# Additional info
-with st.expander("ℹ️ How to use"):
-    st.markdown(f"""
-    **Interactive Map:**
-    - **Click on a ZIP code** to select it – the trend panel below the map and the summary metrics will update automatically
-    - **Click outside Chicago** (on the gray area) to reset to the overall view
-    - Use the **Play** button to animate through years ({zhvi_min_year}–{zhvi_max_year})
-    - Drag the **slider** to jump to a specific year
-    
-    **Trend Panel:**
-    - Shows home value changes over time using a stepped line/area chart
-    - When a ZIP is selected, it is automatically compared against the Chicago average
-    - Hover over points for exact values
-    
-    **About ZHVI:** Zillow Home Value Index - a smoothed, seasonally adjusted measure of typical home values
-    
-    **Data:** {zhvi_min_year}–{zhvi_max_year} | {len(available_zips)} ZIP codes with data
-    """)
+st.markdown("---")
+st.subheader("🏃‍♀️ Price Race")
+
+df_race = race_zhvi_df.copy()
+df_race = df_race[df_race["Zhvi"] > 0]
+if df_race.empty:
+    st.info("No ZHVI data available for the bar chart race.")
+else:
+    # Use ZIP + neighborhood label when available
+    if "ZipName" in gdf_merged.columns:
+        name_map = (
+            gdf_merged[["ZIP", "ZipName"]]
+            .drop_duplicates()
+            .set_index("ZIP")["ZipName"]
+            .to_dict()
+        )
+    else:
+        name_map = {}
+
+    df_race["ZipLabel"] = df_race["ZIP"].apply(
+        lambda z: f"{z} - {name_map.get(z, '')}" if name_map.get(z, "") else z
+    )
+    # Sort within each year so rankings move over time
+    df_race = df_race.sort_values(["Year", "Zhvi"])
+
+    # Ensure all ZIP labels appear on the y-axis (no automatic skipping)
+    zip_labels_order = sorted(df_race["ZipLabel"].unique())
+
+    fig_race = px.bar(
+        df_race,
+        x="Zhvi",
+        y="ZipLabel",
+        color="ZIP",
+        orientation="h",
+        animation_frame="Year",
+        range_x=[0, df_race["Zhvi"].max() * 1.1],
+        labels={
+            "Zhvi": "Average Home Value (USD)",
+            "ZipLabel": "ZIP & Neighborhood",
+        },
+        title="Home Value Race",
+    )
+
+if "fig_race" in locals() and fig_race is not None:
+    fig_race.update_layout(
+        template="simple_white",
+        height=800,
+        margin=dict(l=80, r=40, t=60, b=40),
+        legend_title_text="ZIP Code",
+        showlegend=False,
+        xaxis=dict(
+            showgrid=True,
+            gridcolor="rgba(148,163,184,0.35)",
+            gridwidth=1,
+        ),
+        yaxis=dict(
+            categoryorder="array",
+            categoryarray=zip_labels_order,
+            tickmode="array",
+            tickvals=zip_labels_order,
+            ticktext=zip_labels_order,
+            automargin=True,
+        ),
+    )
+    st.plotly_chart(fig_race, use_container_width=True)
