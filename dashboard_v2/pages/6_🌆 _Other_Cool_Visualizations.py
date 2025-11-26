@@ -921,6 +921,8 @@ st.write(
     "They combine population, home values, crime rates, and neighborhood adjacency into "
     "simple, minimalist visual stories.\n"
     "- **Safety score** = `1 - percentile_rank(crime_rate_latest)` (lower crime → higher safety, better color spread). \n"
+    "- **Population score** = 0-1 normalized population (higher population → higher score). \n"
+    "- **Home value score** = reversed 0-1 normalized latest average home value (higher value → lower score). \n"
     "- **Overall score** is a weighted mix of population, safety, and home value scores (weights set in the sidebar)."
 )
 
