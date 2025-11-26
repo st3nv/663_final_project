@@ -26,7 +26,7 @@ st.title("🏠 Housing Prices")
 st.markdown("Track home value changes across Chicago neighborhoods over time")
 
 # Sidebar settings
-st.sidebar.header("📌 Chicago Dashboard")
+# st.sidebar.header("📌 Chicago Dashboard")
 exclude_zips, exclude_2025 = get_exclude_settings()
 
 # Load data
