@@ -40,7 +40,7 @@ def apply_zip_exclusion(gdf, exclude_zips):
     return gdf
 
 def get_exclude_settings():
-    """Shared ZIP code exclusion settings for sidebar"""
+    """Shared ZIP code exclusion and year settings for sidebar"""
     with st.sidebar.expander("⚙️ Settings", expanded=True):
         exclude_enabled = st.checkbox("Exclude specific ZIP codes", value=True)
         
@@ -60,8 +60,14 @@ def get_exclude_settings():
         else:
             exclude_zips = []
             st.caption("📍 Showing all ZIP codes")
+
+        exclude_2025 = st.checkbox(
+            "Exclude year 2025 data (if present)",
+            value=True,
+            help="When checked, any 2025 values are removed from maps and trend charts."
+        )
     
-    return exclude_zips
+    return exclude_zips, exclude_2025
 
 def prepare_map_data(gdf, crime_df, zhvi_df, pop_2021):
     """Prepare data for JavaScript map visualization"""

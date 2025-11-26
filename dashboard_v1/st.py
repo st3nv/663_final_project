@@ -298,6 +298,9 @@ if st.session_state.active_view == 'map':
             font-size: 12px;
             margin-top: 5px;
         }}
+        .zip-label {{
+            pointer-events: none;
+        }}
     </style>
 </head>
 <body>
@@ -342,6 +345,7 @@ if st.session_state.active_view == 'map':
         let isPlaying = false;
         let animationInterval = null;
         let map, geoJsonLayer;
+        let labelLayerGroup;  // Layer group for labels - FIX 1: track labels separately
         
         // Set year range based on map type
         if (mapType === 'Crime Rate') {{
@@ -379,6 +383,9 @@ if st.session_state.active_view == 'map':
             maxZoom: 19
         }}).addTo(map);
         
+        // FIX 2: Create a layer group for labels (created once, cleared on update)
+        labelLayerGroup = L.layerGroup().addTo(map);
+        
         // Color scales
         const crimeColors = ['#ffffcc', '#ffeda0', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#bd0026', '#800026'];
         const popColors = ['#fee5d9', '#fcae91', '#fb6a4a', '#de2d26', '#a50f15'];
@@ -408,6 +415,9 @@ if st.session_state.active_view == 'map':
             if (geoJsonLayer) {{
                 map.removeLayer(geoJsonLayer);
             }}
+            
+            // FIX 3: Clear all labels from the layer group before adding new ones
+            labelLayerGroup.clearLayers();
             
             let maxValue, getValue, colors, metric, legendTitle;
             
@@ -488,17 +498,24 @@ if st.session_state.active_view == 'map':
                         popupContent += `Total Crimes (${{currentYear}}): ${{props.crimes.toLocaleString()}}`;
                     }}
                     
-                    layer.bindPopup(popupContent);
+                    // FIX 4: Disable autoPan to prevent map from moving/resizing when popup opens
+                    layer.bindPopup(popupContent, {{
+                        autoPan: false,
+                        closeOnClick: true
+                    }});
                     
-                    // Add label
+                    // FIX 5: Add label to the layer group instead of directly to map
                     const center = layer.getBounds().getCenter();
-                    L.marker(center, {{
+                    const labelMarker = L.marker(center, {{
                         icon: L.divIcon({{
                             className: 'zip-label',
                             html: `<div style="font-size: 9px; font-weight: bold; color: black; text-align: center; text-shadow: 1px 1px 2px white, -1px -1px 2px white;">${{props.zip}}</div>`,
-                            iconSize: [40, 20]
-                        }})
-                    }}).addTo(map);
+                            iconSize: [40, 20],
+                            iconAnchor: [20, 10]
+                        }}),
+                        interactive: false  // FIX 6: Make labels non-interactive
+                    }});
+                    labelLayerGroup.addLayer(labelMarker);
                 }}
             }}).addTo(map);
             

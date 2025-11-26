@@ -21,7 +21,7 @@ st.markdown("View population distribution across Chicago ZIP codes (2021 Census 
 
 # Sidebar settings
 st.sidebar.header("📌 Chicago Dashboard")
-exclude_zips = get_exclude_settings()
+exclude_zips, exclude_2025 = get_exclude_settings()
 
 # Load data
 gdf = load_geodata()
@@ -29,6 +29,12 @@ gdf = apply_zip_exclusion(gdf, exclude_zips)
 pop_2021 = load_population_data()
 crime_df = load_crime_data()
 zhvi_df = load_housing_data()
+
+if exclude_2025:
+    if 'year' in crime_df.columns:
+        crime_df = crime_df[crime_df['year'] != 2025]
+    if 'Year' in zhvi_df.columns:
+        zhvi_df = zhvi_df[zhvi_df['Year'] != 2025]
 
 # Prepare map data
 map_data, gdf_merged, crime_min_year, crime_max_year, zhvi_min_year, zhvi_max_year = prepare_map_data(
@@ -42,7 +48,7 @@ html_code = generate_map_html(
     crime_min_year, crime_max_year, 
     zhvi_min_year, zhvi_max_year
 )
-components.html(html_code, height=750, scrolling=False)
+components.html(html_code, height=620, scrolling=False)
 
 # Statistics below the map
 st.subheader("Population Statistics (2021)")
