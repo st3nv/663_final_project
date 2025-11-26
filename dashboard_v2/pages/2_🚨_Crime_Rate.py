@@ -16,27 +16,11 @@ from utils.data_loader import (
 from utils.map_generator import generate_map_html
 
 st.set_page_config(page_title="Crime Rate Map", page_icon="🚨", layout="wide")
-
-# Hide metric arrows only for the neighborhood metrics (second row of columns)
-st.write(
-    """
-    <style>
-    /* On this page the first four columns hold the summary metrics row.
-       The next two columns (5 and 6) hold the neighborhood metrics. */
-    div[data-testid="column"]:nth-of-type(n+5) [data-testid="stMetricDelta"] svg {
-        display: none;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 # Get selected ZIP from query params (set by map clicks)
 query_params = st.query_params
 selected_zip_from_url = query_params.get("selected_zip", None)
 if isinstance(selected_zip_from_url, list):
     selected_zip_from_url = selected_zip_from_url[0] if selected_zip_from_url else None
-
 st.title("🚨 Crime Rate Analysis")
 st.markdown("Explore crime rates per 1,000 residents with animated timeline")
 
