@@ -5,37 +5,96 @@ import numpy as np
 import json
 import plotly.express as px
 import plotly.graph_objects as go
-import streamlit.components.v1 as components
-from shapely.geometry import Point
+import statsmodels.api as sm
 from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
 
-st.set_page_config(page_title="Chicago ZIP Visual Playground", layout="wide")
+# -----------------------------
+# Page config
+# -----------------------------
+st.set_page_config(page_title="Chicago Housing & Crime Lab", layout="wide")
 
+# -----------------------------
+# ZIP name dictionary
+# -----------------------------
+ZIP_NAME_MAP = {
+    60601: "Lakeshore East / New Eastside",
+    60602: "Central Loop",
+    60603: "Financial District",
+    60604: "South Loop (Historic Core)",
+    60605: "South Loop / Museum Campus",
+    60606: "West Loop (Financial Annex)",
+    60607: "West Loop / UIC",
+    60608: "Pilsen / Lower West Side",
+    60609: "Back of the Yards / Fuller Park",
+    60610: "Old Town / Near North Side",
+    60611: "Streeterville / Magnificent Mile",
+    60612: "Near West Side / Illinois Medical District",
+    60613: "Lakeview / Wrigleyville",
+    60614: "Lincoln Park",
+    60615: "Hyde Park (North)",
+    60616: "Chinatown / Near South Side",
+    60617: "South Chicago / East Side",
+    60618: "Avondale / Irving Park",
+    60619: "Chatham / Avalon Park",
+    60620: "Auburn Gresham",
+    60621: "Englewood",
+    60622: "Wicker Park / Ukrainian Village",
+    60623: "Little Village",
+    60624: "East Garfield Park",
+    60625: "Lincoln Square / Ravenswood",
+    60626: "Rogers Park",
+    60628: "Roseland / Pullman",
+    60629: "West Lawn / Chicago Lawn",
+    60630: "Jefferson Park",
+    60631: "Edison Park / Norwood Park",
+    60632: "Brighton Park",
+    60633: "Hegewisch",
+    60634: "Belmont Cragin",
+    60636: "West Englewood",
+    60637: "Hyde Park (South) / Woodlawn",
+    60638: "Garfield Ridge",
+    60639: "Hermosa / Belmont Cragin (West)",
+    60640: "Uptown",
+    60641: "Irving Park / Portage Park",
+    60642: "River West / Noble Square",
+    60643: "Morgan Park / Beverly (North)",
+    60644: "Austin (West)",
+    60645: "West Ridge",
+    60646: "Forest Glen / Edgebrook",
+    60647: "Logan Square",
+    60649: "South Shore",
+    60651: "Humboldt Park / West Humboldt Park",
+    60652: "Ashburn",
+    60653: "Bronzeville",
+    60654: "River North",
+    60655: "Mount Greenwood",
+    60656: "O'Hare / Norwood Park East",
+    60657: "Lakeview East / Boystown",
+    60659: "North Park / West Ridge (North)",
+    60660: "Edgewater",
+    60661: "Fulton River District",
+}
 
-# ============ 工具函数 ============
-
-def normalize_series(s: pd.Series, reverse: bool = False) -> pd.Series:
-    s = s.astype(float)
-    if s.empty:
-        return s
-    mn = s.min()
-    mx = s.max()
-    if mx == mn:
-        return pd.Series([0.5] * len(s), index=s.index)
-    scaled = (s - mn) / (mx - mn)
-    return 1.0 - scaled if reverse else scaled
-
-
-# ============ 读数据 & 预处理 ============
-
+# -----------------------------
+# Data loading & preprocessing
+# -----------------------------
+@st.cache_data(show_spinner=False)
 def load_data():
-    # --- Geo（含 ZipName） ---
+    # Geo
     geojson_path = "data/chicago_zipcodes.geojson"
     gdf = gpd.read_file(geojson_path)
     gdf["ZIP"] = gdf["ZIP"].astype(str)
 
-    # --- Population ---
+    # Map ZipName: use GeoJSON column first, then dict, then fallback
+    zip_int = pd.to_numeric(gdf["ZIP"], errors="coerce")
+    mapped_names = zip_int.map(ZIP_NAME_MAP)
+    if "ZipName" in gdf.columns:
+        gdf["ZipName"] = gdf["ZipName"].fillna(mapped_names)
+    else:
+        gdf["ZipName"] = mapped_names
+    gdf["ZipName"] = gdf["ZipName"].fillna("ZIP " + gdf["ZIP"])
+
+    # Population (2021)
     pop_df = pd.read_csv("data/Chicago_Population_Counts.csv")
     pop_2021 = pop_df[pop_df["Year"] == 2021].copy()
     pop_2021["ZIP"] = pop_2021["Geography"].astype(str)
@@ -44,1286 +103,1079 @@ def load_data():
         on="ZIP",
         how="left",
     )
-    gdf["Population - Total"] = gdf["Population - Total"].fillna(0)
+    gdf["Population - Total"] = gdf["Population - Total"].fillna(0.0)
 
-    # --- Crime ---
+    # Geometry helpers
+    gdf["centroid"] = gdf.geometry.centroid
+    gdf["centroid_lon"] = gdf["centroid"].x
+    gdf["centroid_lat"] = gdf["centroid"].y
+
+    # Approx distance to Loop center (Euclidean in degrees, just for ranking)
+    loop_lat, loop_lon = 41.881832, -87.623177
+    gdf["distance_from_loop"] = np.sqrt(
+        (gdf["centroid_lat"] - loop_lat) ** 2
+        + (gdf["centroid_lon"] - loop_lon) ** 2
+    )
+
+    # Crime yearly
     crime_df = pd.read_csv("data/chicago_crime_preprocessed.csv")
     crime_df["ZIP"] = crime_df["ZIP"].astype(str)
-    crime_min_year = int(crime_df["year"].min())
-    crime_max_year = int(crime_df["year"].max())
+    crime_yearly = (
+        crime_df.groupby(["ZIP", "year"])["crime_count"]
+        .sum()
+        .reset_index()
+    )
 
-    crime_by_year = {}
-    for year in range(crime_min_year, crime_max_year + 1):
-        crime_year = (
-            crime_df[crime_df["year"] == year]
-            .groupby("ZIP")["crime_count"]
-            .sum()
-            .reset_index()
-        )
-        crime_year.columns = ["ZIP", "total_crimes"]
-        crime_by_year[year] = crime_year.set_index("ZIP")["total_crimes"].to_dict()
-
-    # --- Housing (ZHVI) ---
+    # Housing yearly (ZHVI)
     zhvi_df = pd.read_csv("data/chicago_zhvi_preprocessed.csv")
     zhvi_df["RegionName"] = zhvi_df["RegionName"].astype(str)
-    zhvi_min_year = int(zhvi_df["Year"].min())
-    zhvi_max_year = int(zhvi_df["Year"].max())
-
-    zhvi_by_year = {}
-    for year in range(zhvi_min_year, zhvi_max_year + 1):
-        zhvi_year = (
-            zhvi_df[zhvi_df["Year"] == year]
-            .groupby("RegionName")["Zhvi"]
-            .mean()
-            .reset_index()
-        )
-        zhvi_year.columns = ["ZIP", "avg_zhvi"]
-        zhvi_by_year[year] = zhvi_year.set_index("ZIP")["avg_zhvi"].to_dict()
-
-    # --- Centroid 列（注意：后面 to_json 不会把它带进去） ---
-    gdf["centroid"] = gdf.geometry.centroid
-
-    # --- ZipName 映射 ---
-    zip_name_map = {}
-    if "ZipName" in gdf.columns:
-        zip_name_map = (
-            gdf[["ZIP", "ZipName"]]
-            .drop_duplicates()
-            .set_index("ZIP")["ZipName"]
-            .to_dict()
-        )
-
-    # --- map_data: 用于各种时间序列玩具 ---
-    map_data = []
-    for _, row in gdf.iterrows():
-        zip_code = row["ZIP"]
-        population = float(row["Population - Total"])
-
-        crimes_all_years = {}
-        for year in range(crime_min_year, crime_max_year + 1):
-            crimes = crime_by_year[year].get(zip_code, 0)
-            crimes_all_years[str(year)] = float(crimes)
-
-        zhvi_all_years = {}
-        for year in range(zhvi_min_year, zhvi_max_year + 1):
-            zhvi = zhvi_by_year[year].get(zip_code, 0)
-            zhvi_all_years[str(year)] = float(zhvi)
-
-        centroid = row["centroid"]
-
-        map_data.append(
-            {
-                "zip": zip_code,
-                "population": population,
-                "crimes": crimes_all_years,
-                "zhvi": zhvi_all_years,
-                "centroid_lat": centroid.y,
-                "centroid_lng": centroid.x,
-            }
-        )
-
-    # --- zip_df: 最新年份的综合指标 ---
-    zip_metrics = []
-    for z in map_data:
-        zip_code = z["zip"]
-        pop_val = z["population"]
-        crimes_latest = z["crimes"].get(str(crime_max_year), 0.0)
-        zhvi_latest = z["zhvi"].get(str(zhvi_max_year), 0.0)
-        crime_rate_latest = (crimes_latest / pop_val * 1000) if pop_val > 0 else 0.0
-        zip_metrics.append(
-            {
-                "ZIP": zip_code,
-                "ZipName": zip_name_map.get(zip_code, None),
-                "population": pop_val,
-                "crimes_latest": crimes_latest,
-                "crime_rate_latest": crime_rate_latest,
-                "zhvi_latest": zhvi_latest,
-                "centroid_lat": z["centroid_lat"],
-                "centroid_lng": z["centroid_lng"],
-            }
-        )
-    zip_df = pd.DataFrame(zip_metrics)
-
-    # --- 距离 Loop，用于 Orbit & 聚类 ---
-    loop_center = Point(-87.6298, 41.8781)
-    gdf["distance_from_loop"] = gdf["centroid"].distance(loop_center)
-
-    # --- Bar chart race 数据 ---
-    race_zhvi_records = []
-    race_crime_records = []
-    for z in map_data:
-        for y_str, val in z["zhvi"].items():
-            year = int(y_str)
-            if val <= 0:
-                continue
-            race_zhvi_records.append({"ZIP": z["zip"], "Year": year, "Zhvi": val})
-
-        for y_str, crimes in z["crimes"].items():
-            year = int(y_str)
-            pop = z["population"]
-            rate = crimes / pop * 1000 if pop > 0 else 0.0
-            race_crime_records.append(
-                {"ZIP": z["zip"], "Year": year, "CrimeRate": rate}
-            )
-
-    race_zhvi_df = pd.DataFrame(race_zhvi_records)
-    race_crime_df = pd.DataFrame(race_crime_records)
-
-    centroids = gdf["centroid"]
-    center_lat = centroids.y.mean()
-    center_lon = centroids.x.mean()
-
-    return (
-        gdf,
-        pop_df,
-        crime_df,
-        zhvi_df,
-        map_data,
-        zip_df,
-        crime_min_year,
-        crime_max_year,
-        zhvi_min_year,
-        zhvi_max_year,
-        race_zhvi_df,
-        race_crime_df,
-        center_lat,
-        center_lon,
+    zhvi_yearly = (
+        zhvi_df.groupby(["RegionName", "Year"])["Zhvi"]
+        .mean()
+        .reset_index()
+    )
+    zhvi_yearly = zhvi_yearly.rename(
+        columns={
+            "RegionName": "ZIP",
+            "Year": "year",
+        }
     )
 
-
-# ===== 读数据 =====
-(
-    gdf,
-    pop_df,
-    crime_df,
-    zhvi_df,
-    map_data,
-    zip_df,
-    crime_min_year,
-    crime_max_year,
-    zhvi_min_year,
-    zhvi_max_year,
-    race_zhvi_df,
-    race_crime_df,
-    center_lat,
-    center_lon,
-) = load_data()
-
-# ===== 打分（Population / Safety / Value / Overall） =====
-if not zip_df.empty:
-    zip_df["pop_score"] = normalize_series(zip_df["population"], reverse=False)
-    zip_df["safety_score"] = normalize_series(zip_df["crime_rate_latest"], reverse=True)
-    zip_df["value_score"] = normalize_series(zip_df["zhvi_latest"], reverse=False)
-    zip_df["overall_score"] = (
-        zip_df["pop_score"] + zip_df["safety_score"] + zip_df["value_score"]
-    ) / 3.0
-
-    if "ZipName" in zip_df.columns:
-        zip_df["ZIP_label"] = zip_df.apply(
-            lambda r: f"{r['ZIP']} – {r['ZipName']}"
-            if isinstance(r["ZipName"], str) and r["ZipName"]
-            else r["ZIP"],
-            axis=1,
-        )
-    else:
-        zip_df["ZIP_label"] = zip_df["ZIP"]
-else:
-    zip_df["ZIP_label"] = zip_df["ZIP"]
-
-# ===== 邻接表（Network 用） =====
-neighbors = []
-gdf_buf = gdf[["ZIP", "geometry"]].copy()
-gdf_buf["geometry"] = gdf_buf["geometry"].buffer(0)
-for i in range(len(gdf_buf)):
-    zi = gdf_buf.iloc[i]
-    for j in range(i + 1, len(gdf_buf)):
-        zj = gdf_buf.iloc[j]
-        if zi["geometry"].touches(zj["geometry"]):
-            neighbors.append({"source": zi["ZIP"], "target": zj["ZIP"]})
-
-nodes_df = zip_df[["ZIP", "overall_score", "safety_score"]].copy()
-nodes_json = json.dumps(nodes_df.to_dict(orient="records"))
-links_json = json.dumps(neighbors)
-
-
-# ============ Relationship Lab 辅助函数 ============
-
-def build_traj_df(
-    map_data, crime_min_year, crime_max_year, zhvi_min_year, zhvi_max_year
-):
-    records = []
-    for z in map_data:
-        zh_earliest = z["zhvi"].get(str(zhvi_min_year), 0.0)
-        zh_latest = z["zhvi"].get(str(zhvi_max_year), 0.0)
-        if zh_earliest <= 0 or zh_latest <= 0:
-            continue
-        c_earliest = z["crimes"].get(str(crime_min_year), 0.0)
-        c_latest = z["crimes"].get(str(crime_max_year), 0.0)
-        pop = z["population"]
-        if pop <= 0:
-            continue
-        cr_earliest = c_earliest / pop * 1000
-        cr_latest = c_latest / pop * 1000
-        records.append(
-            {
-                "ZIP": z["zip"],
-                "zhvi_earliest": zh_earliest,
-                "zhvi_latest": zh_latest,
-                "crime_rate_earliest": cr_earliest,
-                "crime_rate_latest": cr_latest,
-            }
-        )
-    df = pd.DataFrame(records)
-    if df.empty:
-        return df
-    df["zhvi_change_pct"] = (
-        (df["zhvi_latest"] - df["zhvi_earliest"]) / df["zhvi_earliest"] * 100.0
-    )
-    df["crime_change"] = df["crime_rate_latest"] - df["crime_rate_earliest"]
-    return df
-
-
-def build_cluster_df(zip_df, gdf, n_clusters: int = 4):
-    tmp = gdf[["ZIP", "distance_from_loop"]].merge(
-        zip_df[["ZIP", "population", "crime_rate_latest", "zhvi_latest"]],
-        on="ZIP",
+    # Model dataset: one row per (ZIP, year) where we have both crime & ZHVI
+    model_df = crime_yearly.merge(
+        zhvi_yearly,
+        on=["ZIP", "year"],
         how="inner",
     )
-    tmp = tmp.dropna(subset=["population", "crime_rate_latest", "zhvi_latest"])
-    if tmp.empty:
-        return tmp
 
-    features = tmp[
-        ["population", "crime_rate_latest", "zhvi_latest", "distance_from_loop"]
-    ].copy()
-    scaler = StandardScaler()
-    X = scaler.fit_transform(features)
+    # Attach static ZIP attributes
+    model_df = model_df.merge(
+        gdf[["ZIP", "ZipName", "Population - Total", "distance_from_loop"]],
+        on="ZIP",
+        how="left",
+    )
+    model_df = model_df[model_df["Population - Total"] > 0].copy()
 
-    if n_clusters < 2:
-        n_clusters = 2
-    if n_clusters > len(tmp):
-        n_clusters = max(2, len(tmp) // 2)
+    model_df["crime_rate"] = (
+        model_df["crime_count"] / model_df["Population - Total"] * 1000.0
+    )
+    model_df["log_zhvi"] = np.log(model_df["Zhvi"])
 
-    # 修复：使用数值 n_init 而不是 "auto"，提高兼容性
-    km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    tmp["cluster"] = km.fit_predict(X)
-    return tmp
-
-
-# ============ 各个视图 ============
-
-def render_overview_map():
-    st.markdown("### 🗺️ Overview Map · 总览地图")
-    variable = st.selectbox(
-        "Map metric / 地图指标",
-        ["Population (2021)", "Crime Count", "Crime Rate", "Home Value (ZHVI)"],
+    # ZIP-level summary for radar & rankings
+    summary = (
+        model_df.groupby("ZIP")
+        .agg(
+            mean_zhvi=("Zhvi", "mean"),
+            mean_crime_rate=("crime_rate", "mean"),
+            population=("Population - Total", "first"),
+            distance_from_loop=("distance_from_loop", "first"),
+            ZipName=("ZipName", "first"),
+        )
+        .reset_index()
     )
 
-    year = None
-    if variable in ["Crime Count", "Crime Rate"]:
-        year = st.slider(
-            "Crime year / 犯罪年份",
-            min_value=crime_min_year,
-            max_value=crime_max_year,
-            value=crime_max_year,
-        )
-    elif variable == "Home Value (ZHVI)":
-        year = st.slider(
-            "ZHVI year / 房价年份",
-            min_value=zhvi_min_year,
-            max_value=zhvi_max_year,
-            value=zhvi_max_year,
-        )
+    # Standardize for composite score
+    feats = summary[["mean_zhvi", "mean_crime_rate", "population", "distance_from_loop"]].copy()
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(feats.fillna(0.0))
+    summary["zhvi_z"] = scaled[:, 0]
+    summary["crime_z"] = scaled[:, 1]
+    summary["pop_z"] = scaled[:, 2]
+    summary["dist_z"] = scaled[:, 3]
 
-    value_records = []
-    for z in map_data:
-        val = 0.0
-        if variable == "Population (2021)":
-            val = z["population"]
-        elif variable == "Crime Count":
-            val = z["crimes"].get(str(year), 0.0)
-        elif variable == "Crime Rate":
-            crimes = z["crimes"].get(str(year), 0.0)
-            pop = z["population"]
-            val = crimes / pop * 1000 if pop > 0 else 0.0
-        elif variable == "Home Value (ZHVI)":
-            val = z["zhvi"].get(str(year), 0.0)
-        value_records.append({"ZIP": z["zip"], "value": val})
+    # Higher ZHVI, higher population, closer to Loop, lower crime = better
+    summary["composite_score"] = (
+        summary["zhvi_z"]
+        - summary["crime_z"]
+        + 0.3 * summary["pop_z"]
+        - 0.3 * summary["dist_z"]
+    )
 
-    value_df = pd.DataFrame(value_records)
-    map_df = gdf.merge(value_df, on="ZIP", how="left").copy()
-    map_df = map_df[map_df["value"].notna()].copy()
+    return gdf, crime_yearly, zhvi_yearly, model_df, summary
 
-    # Label：ZIP + 名称
-    if "ZipName" in map_df.columns:
-        map_df["Label"] = map_df.apply(
-            lambda r: f"{r['ZIP']} – {r['ZipName']}"
-            if isinstance(r["ZipName"], str) and r["ZipName"]
-            else r["ZIP"],
-            axis=1,
-        )
+
+# -----------------------------
+# Helper: build geojson for map (drop centroid Point column)
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def build_geojson():
+    gdf, _, _, _, _ = load_data()
+    if "centroid" in gdf.columns:
+        gdf_no_centroid = gdf.drop(columns=["centroid"])
     else:
-        map_df["Label"] = map_df["ZIP"]
+        gdf_no_centroid = gdf
+    geojson = json.loads(gdf_no_centroid.to_json())
+    return geojson
 
-    # *** 关键修复：只用 ["ZIP", "geometry"] 生成 geojson，避免 Point 序列化错误 ***
-    geojson = json.loads(map_df[["ZIP", "geometry"]].to_json())
 
-    color_label = {
-        "Population (2021)": "Population",
-        "Crime Count": f"Crime Count ({year})" if year is not None else "Crime Count",
-        "Crime Rate": f"Crime Rate ({year}) per 1000" if year is not None else "Crime Rate per 1000",
-        "Home Value (ZHVI)": f"ZHVI ({year})" if year is not None else "ZHVI",
-    }[variable]
+# -----------------------------
+# Overview Map
+# -----------------------------
+def render_overview_map():
+    gdf, crime_yearly, zhvi_yearly, _, _ = load_data()
+    geojson = build_geojson()
 
-    color_scale = "YlGnBu" if variable in [
-        "Population (2021)",
-        "Home Value (ZHVI)",
-    ] else "YlOrRd"
+    st.markdown("## 🗺️ Overview Map of Chicago ZIP Codes")
 
-    # 修复：hover_data 动态构造，防止 ZipName 不存在时报错
-    hover_data = {"ZIP": True, "value": ":,.0f"}
+    col_left, col_right = st.columns([2, 1])
+    with col_left:
+        map_metric = st.selectbox(
+            "Select variable to visualize on the map",
+            ["Population (2021)", "Crime Rate", "Housing Price (ZHVI)"],
+        )
+
+    with col_right:
+        st.markdown(
+            "Fine-tune the year and see how the city evolves over time. "
+            "Hover any area for details."
+        )
+
+    # ---- Population map (2021) ----
+    if map_metric == "Population (2021)":
+        year = 2021
+        map_df = gdf.copy()
+        color_col = "Population - Total"
+        color_label = "Population (2021)"
+        title = "Population Distribution (2021 Census)"
+
+    # ---- Crime rate map ----
+    elif map_metric == "Crime Rate":
+        years = sorted(crime_yearly["year"].unique())
+        year = st.slider(
+            "Select year for crime data",
+            min_value=int(years[0]),
+            max_value=int(years[-1]),
+            value=int(years[-1]),
+            step=1,
+        )
+        tmp = crime_yearly[crime_yearly["year"] == year].copy()
+        tmp = tmp.merge(
+            gdf[["ZIP", "ZipName", "Population - Total"]],
+            on="ZIP",
+            how="right",
+        )
+        tmp["crime_count"] = tmp["crime_count"].fillna(0)
+        tmp["crime_rate"] = np.where(
+            tmp["Population - Total"] > 0,
+            tmp["crime_count"] / tmp["Population - Total"] * 1000.0,
+            np.nan,
+        )
+        map_df = tmp
+        color_col = "crime_rate"
+        color_label = "Crime Rate (per 1,000 residents)"
+        title = f"Crime Rate by ZIP – {year}"
+
+    # ---- Housing (ZHVI) map ----
+    else:  # Housing Price (ZHVI)
+        years = sorted(zhvi_yearly["year"].unique())
+        year = st.slider(
+            "Select year for housing prices (ZHVI)",
+            min_value=int(years[0]),
+            max_value=int(years[-1]),
+            value=int(years[-1]),
+            step=1,
+        )
+        tmp = zhvi_yearly[zhvi_yearly["year"] == year].copy()
+        tmp = tmp.merge(
+            gdf[["ZIP", "ZipName", "Population - Total"]],
+            on="ZIP",
+            how="right",
+        )
+        map_df = tmp
+        color_col = "Zhvi"
+        color_label = "ZHVI (Home Value Index)"
+        title = f"Home Values by ZIP (ZHVI) – {year}"
+
+    # ---- Hover info ----
+    if "ZipName" not in map_df.columns:
+        map_df = map_df.merge(
+            gdf[["ZIP", "ZipName"]],
+            on="ZIP",
+            how="left",
+        )
+
+    hover_data = {"ZIP": True}
     if "ZipName" in map_df.columns:
         hover_data["ZipName"] = True
+    if "Population - Total" in map_df.columns:
+        hover_data["Population - Total"] = ":,"
+    if color_col in map_df.columns:
+        if color_col == "Zhvi":
+            hover_data[color_col] = ":,.0f"
+        else:
+            hover_data[color_col] = ":.1f"
 
     fig = px.choropleth_mapbox(
         map_df,
         geojson=geojson,
         locations="ZIP",
         featureidkey="properties.ZIP",
-        color="value",
-        color_continuous_scale=color_scale,
-        mapbox_style="carto-positron",
-        center={"lat": center_lat, "lon": center_lon},
-        zoom=9.5,
-        opacity=0.8,
-        hover_name="Label",
+        color=color_col,
+        hover_name="ZipName",
         hover_data=hover_data,
-        labels={"value": color_label},
+        color_continuous_scale="Viridis",
+        mapbox_style="carto-positron",
+        center={"lat": 41.85, "lon": -87.65},
+        zoom=9.2,
+        opacity=0.85,
     )
     fig.update_layout(
+        margin=dict(r=0, t=40, l=0, b=0),
         height=620,
-        margin=dict(l=0, r=0, t=40, b=0),
-        coloraxis_colorbar=dict(
-            title=color_label,
-            thickness=14,
-            len=0.6,
+        title=title,
+        coloraxis_colorbar=dict(title=color_label),
+        template="plotly_white",
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ---- Quick stats ----
+    st.markdown("### 🔍 Quick Statistics")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Number of ZIP codes", len(gdf))
+    with col2:
+        st.metric("Total population (2021)", f"{int(gdf['Population - Total'].sum()):,}")
+    with col3:
+        if map_metric == "Crime Rate":
+            total_crimes = map_df["crime_count"].fillna(0).sum()
+            st.metric(f"Total crimes in {year}", f"{int(total_crimes):,}")
+        elif map_metric == "Housing Price (ZHVI)":
+            mean_val = map_df["Zhvi"].mean()
+            st.metric(f"Average ZHVI in {year}", f"${mean_val:,.0f}")
+        else:
+            mean_pop = gdf["Population - Total"].mean()
+            st.metric("Average population per ZIP", f"{int(mean_pop):,}")
+
+
+# -----------------------------
+# ZIP Explorer – Bubble Time Series
+# -----------------------------
+def render_zip_explorer():
+    gdf, crime_yearly, zhvi_yearly, _, _ = load_data()
+    st.markdown("## 📍 ZIP Explorer – Bubble Time Series")
+
+    zip_options = (
+        gdf[["ZIP", "ZipName"]]
+        .drop_duplicates()
+        .sort_values("ZIP")
+        .assign(label=lambda df: df["ZIP"] + " – " + df["ZipName"])
+    )
+
+    selected_label = st.selectbox(
+        "Choose a ZIP code to explore",
+        zip_options["label"],
+        index=0,
+    )
+    selected_zip = selected_label.split(" – ")[0]
+
+    pop = float(
+        gdf.loc[gdf["ZIP"] == selected_zip, "Population - Total"].iloc[0]
+        if (gdf["ZIP"] == selected_zip).any()
+        else np.nan
+    )
+
+    crime_ts = crime_yearly[crime_yearly["ZIP"] == selected_zip].copy()
+    housing_ts = zhvi_yearly[zhvi_yearly["ZIP"] == selected_zip].copy()
+
+    merged_ts = pd.merge(
+        crime_ts,
+        housing_ts,
+        on=["ZIP", "year"],
+        how="outer",
+    ).sort_values("year")
+
+    if "crime_count" not in merged_ts.columns:
+        merged_ts["crime_count"] = 0
+    if "Zhvi" not in merged_ts.columns:
+        merged_ts["Zhvi"] = np.nan
+
+    merged_ts["crime_count"] = merged_ts["crime_count"].fillna(0)
+    merged_ts["Zhvi"] = merged_ts["Zhvi"].astype(float)
+
+    if pop > 0:
+        merged_ts["crime_rate"] = merged_ts["crime_count"] / pop * 1000.0
+    else:
+        merged_ts["crime_rate"] = np.nan
+
+    tabs = st.tabs(["Housing over time", "Crime over time", "Bubble comparison"])
+
+    with tabs[0]:
+        fig_h = px.scatter(
+            merged_ts,
+            x="year",
+            y="Zhvi",
+            size=np.maximum(merged_ts["Zhvi"], 1),
+            size_max=40,
+            trendline="ols",
+            labels={"year": "Year", "Zhvi": "ZHVI (Home Value Index)"},
+            title=f"Housing Values over Time – {selected_label}",
+        )
+        fig_h.update_layout(template="plotly_white", height=420)
+        st.plotly_chart(fig_h, use_container_width=True)
+
+    with tabs[1]:
+        fig_c = px.scatter(
+            merged_ts,
+            x="year",
+            y="crime_rate",
+            size=np.maximum(merged_ts["crime_count"], 1),
+            size_max=40,
+            trendline="ols",
+            labels={"year": "Year", "crime_rate": "Crime Rate (per 1,000 residents)"},
+            title=f"Crime Rate over Time – {selected_label}",
+        )
+        fig_c.update_layout(template="plotly_white", height=420)
+        st.plotly_chart(fig_c, use_container_width=True)
+
+    with tabs[2]:
+        comp_df = merged_ts.dropna(subset=["Zhvi", "crime_rate"]).copy()
+        if not comp_df.empty:
+            fig_b = px.scatter(
+                comp_df,
+                x="crime_rate",
+                y="Zhvi",
+                size=np.maximum(comp_df["Zhvi"], 1),
+                size_max=45,
+                color="year",
+                color_continuous_scale="Plasma",
+                labels={
+                    "crime_rate": "Crime Rate (per 1,000 residents)",
+                    "Zhvi": "ZHVI (Home Value Index)",
+                    "year": "Year",
+                },
+                title=f"ZHVI vs Crime Rate over Time – {selected_label}",
+            )
+            fig_b.update_layout(template="plotly_white", height=420)
+            st.plotly_chart(fig_b, use_container_width=True)
+        else:
+            st.info("No overlapping crime & ZHVI data for this ZIP.")
+
+    st.markdown("### Snapshot")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Population (2021)", f"{int(pop) if not np.isnan(pop) else 0:,}")
+    with col2:
+        if merged_ts["Zhvi"].notna().any():
+            latest_row = merged_ts[merged_ts["Zhvi"].notna()].iloc[-1]
+            st.metric(
+                f"Latest ZHVI ({int(latest_row['year'])})",
+                f"${latest_row['Zhvi']:,.0f}",
+            )
+        else:
+            st.metric("Latest ZHVI", "N/A")
+    with col3:
+        if merged_ts["crime_rate"].notna().any():
+            latest_row = merged_ts[merged_ts["crime_rate"].notna()].iloc[-1]
+            st.metric(
+                f"Latest Crime Rate ({int(latest_row['year'])})",
+                f"{latest_row['crime_rate']:.1f} / 1k",
+            )
+        else:
+            st.metric("Latest Crime Rate", "N/A")
+
+
+# -----------------------------
+# Radar & Rankings
+# -----------------------------
+def _z_to_score(z: float) -> float:
+    return float(np.clip(5 + 2 * z, 0, 10))
+
+
+def render_radar_rankings():
+    _, _, _, _, summary = load_data()
+
+    st.markdown("## 🧭 Multi-metric Radar & Rankings")
+
+    min_pop = int(summary["population"].min())
+    max_pop = int(summary["population"].max())
+    pop_cut = st.slider(
+        "Filter ZIPs by minimum population",
+        min_value=min_pop,
+        max_value=max_pop,
+        value=min(min_pop + 5000, max_pop),
+        step=1000,
+    )
+    filtered = summary[summary["population"] >= pop_cut].copy()
+    if filtered.empty:
+        st.warning("No ZIP codes above this population threshold.")
+        return
+
+    top_n = st.slider(
+        "Show top N ZIP codes by composite score",
+        min_value=5,
+        max_value=min(30, len(filtered)),
+        value=min(10, len(filtered)),
+        step=1,
+    )
+
+    ranked = filtered.sort_values("composite_score", ascending=False).head(top_n)
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        fig_bar = px.bar(
+            ranked,
+            x="composite_score",
+            y="ZipName",
+            orientation="h",
+            color="composite_score",
+            color_continuous_scale="Tealgrn",
+            labels={"composite_score": "Composite Score", "ZipName": ""},
+            title="Top ZIPs by Composite Score (Higher = Better)",
+        )
+        fig_bar.update_layout(
+            template="plotly_white",
+            height=520,
+            yaxis=dict(autorange="reversed"),
+            margin=dict(l=10, r=10, t=60, b=10),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    with col2:
+        st.markdown("**How is the score constructed?**")
+        st.markdown(
+            "- Higher home values (ZHVI) ↑\n"
+            "- Lower crime rate ↑\n"
+            "- Higher population (market size) ↑\n"
+            "- Closer to the Loop (centrality) ↑\n"
+            "All features are standardized, then combined into one composite index."
+        )
+
+    st.markdown("### 🕸 Radar View for a Single ZIP")
+    options = (
+        ranked[["ZIP", "ZipName"]]
+        .assign(label=lambda df: df["ZIP"] + " – " + df["ZipName"])
+        .sort_values("label")
+    )
+    selected = st.selectbox(
+        "Select a ZIP from the ranked list",
+        options["label"],
+    )
+    sel_zip = selected.split(" – ")[0]
+    row = ranked[ranked["ZIP"] == sel_zip].iloc[0]
+
+    categories = [
+        "Housing Value",
+        "Crime Safety",
+        "Population Size",
+        "Proximity to Loop",
+    ]
+    values = [
+        _z_to_score(row["zhvi_z"]),
+        _z_to_score(-row["crime_z"]),
+        _z_to_score(row["pop_z"]),
+        _z_to_score(-row["dist_z"]),
+    ]
+    values.append(values[0])
+    categories_closed = categories + [categories[0]]
+
+    fig_rad = go.Figure()
+    fig_rad.add_trace(
+        go.Scatterpolar(
+            r=values,
+            theta=categories_closed,
+            fill="toself",
+            name=selected,
+            line=dict(color="#2563eb"),
+        )
+    )
+    fig_rad.update_layout(
+        template="plotly_white",
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 10]),
         ),
-        paper_bgcolor="#f9fafb",
-        mapbox_accesstoken=None,
+        showlegend=False,
+        height=420,
+        title="Multi-dimensional Profile",
+    )
+    st.plotly_chart(fig_rad, use_container_width=True)
+
+
+# -----------------------------
+# Creative Bubble Lab
+# -----------------------------
+def render_creative_bubbles():
+    _, _, _, _, summary = load_data()
+    st.markdown("## 🫧 Creative Bubble Lab – City as a Bubble Galaxy")
+
+    bubble_df = summary.copy()
+    bubble_df["bubble_size"] = np.maximum(bubble_df["population"], 1)
+    bubble_df["safety_score"] = -bubble_df["crime_z"]
+
+    fig = px.scatter(
+        bubble_df,
+        x="distance_from_loop",
+        y="mean_zhvi",
+        size="bubble_size",
+        color="safety_score",
+        hover_name="ZipName",
+        hover_data={
+            "ZIP": True,
+            "mean_zhvi": ":,.0f",
+            "mean_crime_rate": ":.1f",
+            "population": ":,",
+            "distance_from_loop": ":.3f",
+        },
+        size_max=50,
+        color_continuous_scale="RdYlGn",
+        labels={
+            "distance_from_loop": "Distance from Loop (relative)",
+            "mean_zhvi": "Average ZHVI",
+            "safety_score": "Safety (higher = better)",
+        },
+        title="Each ZIP as a Bubble – Value, Safety & Location Combined",
+    )
+    fig.update_layout(
+        template="plotly_white",
+        height=520,
+        xaxis=dict(showgrid=False),
+        yaxis=dict(showgrid=True),
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    st.markdown(
+        "Interpretation:\n"
+        "- **Bigger bubbles** → more population.\n"
+        "- **Greener bubbles** → safer (lower standardized crime).\n"
+        "- **Higher bubbles** → higher average home values.\n"
+        "- **Left side** → closer to downtown."
+    )
 
-def render_value_safety_lab():
-    st.subheader("💙 Value vs Safety · 房价-安全关系")
 
-    df = zip_df.copy()
-    df = df[(df["zhvi_latest"] > 0) & (df["crime_rate_latest"] > 0)].copy()
-    if df.empty:
-        st.warning("No valid ZIPs with both crime rate and home value.")
+# -----------------------------
+# Statistical Analysis – Linear Models (enriched)
+# -----------------------------
+def render_statistical_analysis():
+    _, _, _, model_df, summary = load_data()
+
+    st.markdown("## 📊 Statistical Analysis – Linking Crime, Housing & Location")
+
+    # ---------- 1. Pooled linear model ----------
+    st.markdown("### 1. Baseline Model: Does Crime Rate Predict Home Values?")
+
+    model_use = model_df.dropna(subset=["crime_rate", "log_zhvi", "distance_from_loop"]).copy()
+    if model_use.empty:
+        st.warning("Not enough overlapping crime & ZHVI data to fit a model.")
         return
 
-    x = df["crime_rate_latest"].values
-    y = df["zhvi_latest"].values
+    # 基准模型：log(ZHVI) ~ crime_rate + distance_from_loop
+    X = model_use[["crime_rate", "distance_from_loop"]]
+    X = sm.add_constant(X)
+    y = model_use["log_zhvi"]
 
-    x_mean = x.mean()
-    y_mean = y.mean()
-    cov_xy = np.mean((x - x_mean) * (y - y_mean))
-    var_x = np.mean((x - x_mean) ** 2)
-    b = cov_xy / (var_x + 1e-9)
-    a = y_mean - b * x_mean
+    ols_model = sm.OLS(y, X).fit()
 
-    df["zhvi_pred"] = a + b * df["crime_rate_latest"]
-    df["zhvi_resid"] = df["zhvi_latest"] - df["zhvi_pred"]
+    params = ols_model.params.rename("coef")
+    bse = ols_model.bse.rename("std_err")
+    pvals = ols_model.pvalues.rename("p_value")
+    coef_df = pd.concat([params, bse, pvals], axis=1)
+    coef_df.index.name = "term"
 
-    resid_std = df["zhvi_resid"].std() if df["zhvi_resid"].std() > 0 else 1.0
-    df["resid_z"] = (df["zhvi_resid"] - df["zhvi_resid"].mean()) / resid_std
+    st.write("**Model specification:**")
+    st.latex(
+        r"\log(\text{ZHVI}_{it}) = \beta_0 + \beta_1 \cdot \text{CrimeRate}_{it} + "
+        r"\beta_2 \cdot \text{DistanceFromLoop}_i + \varepsilon_{it}"
+    )
 
-    def classify_resid(z):
-        if z <= -0.5:
-            return "Undervalued (cheap vs crime)"
-        elif z >= 0.5:
-            return "Overvalued (expensive vs crime)"
-        else:
-            return "On-model"
+    st.write("**Estimated coefficients:**")
+    st.dataframe(
+        coef_df.style.format({"coef": "{:.3f}", "std_err": "{:.3f}", "p_value": "{:.3g}"}),
+        use_container_width=True,
+    )
 
-    df["value_class"] = df["resid_z"].apply(classify_resid)
+    st.markdown(
+        f"- R² = **{ols_model.rsquared:.3f}**,  Adjusted R² = **{ols_model.rsquared_adj:.3f}**  \n"
+        "- Negative coefficient on crime rate ⇒ higher crime associated with lower home values "
+        "(conditional on distance)."
+    )
 
-    # Label
-    if "ZipName" in df.columns:
-        df["Label"] = df.apply(
-            lambda r: f"{r['ZIP']} – {r['ZipName']}"
-            if isinstance(r["ZipName"], str) and r["ZipName"]
-            else r["ZIP"],
-            axis=1,
+    # Predicted vs Actual
+    model_use["resid"] = ols_model.resid
+    pred = ols_model.fittedvalues
+    res_df = pd.DataFrame(
+        {
+            "fitted_log_zhvi": pred,
+            "actual_log_zhvi": y,
+        }
+    )
+
+    fig_scatter = px.scatter(
+        res_df,
+        x="fitted_log_zhvi",
+        y="actual_log_zhvi",
+        trendline="ols",
+        labels={
+            "fitted_log_zhvi": "Predicted log(ZHVI)",
+            "actual_log_zhvi": "Actual log(ZHVI)",
+        },
+        title="Predicted vs Actual log(ZHVI)",
+    )
+    fig_scatter.update_layout(template="plotly_white", height=420)
+    st.plotly_chart(fig_scatter, use_container_width=True)
+
+    # ---------- 2. Extended model with time trend ----------
+    st.markdown("### 2. Extended Model: Adding Time Trend")
+
+    X2 = model_use[["crime_rate", "distance_from_loop", "year"]].copy()
+    X2 = sm.add_constant(X2)
+    y2 = model_use["log_zhvi"]
+    extended_model = sm.OLS(y2, X2).fit()
+
+    params2 = extended_model.params.rename("coef")
+    bse2 = extended_model.bse.rename("std_err")
+    pvals2 = extended_model.pvalues.rename("p_value")
+    coef_df2 = pd.concat([params2, bse2, pvals2], axis=1)
+    coef_df2.index.name = "term"
+
+    st.write("**Extended model specification:**")
+    st.latex(
+        r"\log(\text{ZHVI}_{it}) = \beta_0 + \beta_1 \cdot \text{CrimeRate}_{it} + "
+        r"\beta_2 \cdot \text{DistanceFromLoop}_i + \beta_3 \cdot \text{Year}_t + \varepsilon_{it}"
+    )
+
+    with st.expander("See extended model coefficients"):
+        st.dataframe(
+            coef_df2.style.format({"coef": "{:.3f}", "std_err": "{:.3f}", "p_value": "{:.3g}"}),
+            use_container_width=True,
+        )
+        st.markdown(
+            f"- Extended model R² = **{extended_model.rsquared:.3f}**, "
+            f"Adjusted R² = **{extended_model.rsquared_adj:.3f}**"
+        )
+
+    # ---------- 3. Yearly correlation ----------
+    st.markdown("### 3. Yearly Correlation between Crime & Home Values")
+
+    corr_list = []
+    for year in sorted(model_use["year"].unique()):
+        df_y = model_use[model_use["year"] == year]
+        if df_y["crime_rate"].var() > 0 and df_y["Zhvi"].var() > 0:
+            corr = df_y["crime_rate"].corr(df_y["Zhvi"])
+            corr_list.append({"year": year, "corr": corr})
+
+    corr_df = pd.DataFrame(corr_list)
+    if not corr_df.empty:
+        fig_corr = px.line(
+            corr_df,
+            x="year",
+            y="corr",
+            markers=True,
+            labels={"year": "Year", "corr": "Correlation (crime rate vs ZHVI)"},
+            title="Correlation between Crime Rate and Home Values Over Time",
+        )
+        fig_corr.add_hline(y=0, line_dash="dash")
+        fig_corr.update_layout(template="plotly_white", height=420)
+        st.plotly_chart(fig_corr, use_container_width=True)
+    else:
+        st.info("Not enough data per year to compute meaningful correlations.")
+
+    # ---------- 4. Cross-sectional extremes ----------
+    st.markdown("### 4. Cross-sectional View: Lowest vs Highest Crime ZIPs")
+
+    extremes = summary.sort_values("mean_crime_rate")
+    low_crime = extremes.head(5)
+    high_crime = extremes.tail(5)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("**Lowest average crime rate ZIPs**")
+        st.dataframe(
+            low_crime[["ZIP", "ZipName", "mean_crime_rate", "mean_zhvi", "population"]]
+            .rename(
+                columns={
+                    "mean_crime_rate": "Crime rate",
+                    "mean_zhvi": "ZHVI",
+                    "population": "Population",
+                }
+            )
+            .style.format({"Crime rate": "{:.1f}", "ZHVI": "{:,.0f}", "Population": "{:,}"}),
+            use_container_width=True,
+        )
+    with col2:
+        st.write("**Highest average crime rate ZIPs**")
+        st.dataframe(
+            high_crime[["ZIP", "ZipName", "mean_crime_rate", "mean_zhvi", "population"]]
+            .rename(
+                columns={
+                    "mean_crime_rate": "Crime rate",
+                    "mean_zhvi": "ZHVI",
+                    "population": "Population",
+                }
+            )
+            .style.format({"Crime rate": "{:.1f}", "ZHVI": "{:,.0f}", "Population": "{:,}"}),
+            use_container_width=True,
+        )
+
+    # ---------- 5. Residual analysis ----------
+    st.markdown("### 5. Residual Analysis: Over- and Under-valued ZIPs")
+
+    zip_resid = (
+        model_use.groupby("ZIP")
+        .agg(
+            mean_resid=("resid", "mean"),
+            mean_zhvi=("Zhvi", "mean"),
+            mean_crime_rate=("crime_rate", "mean"),
+            population=("Population - Total", "first"),
+            ZipName=("ZipName", "first"),
+        )
+        .reset_index()
+    )
+
+    top_over = zip_resid.sort_values("mean_resid", ascending=False).head(10)
+    top_under = zip_resid.sort_values("mean_resid", ascending=True).head(10)
+
+    col3, col4 = st.columns(2)
+    with col3:
+        st.write("**ZIPs with positive residuals (actual prices > model prediction)**")
+        fig_over = px.bar(
+            top_over.sort_values("mean_resid"),
+            x="mean_resid",
+            y="ZipName",
+            orientation="h",
+            labels={"mean_resid": "Average residual (log ZHVI)", "ZipName": ""},
+            title="Top 10 Over-performing ZIPs",
+        )
+        fig_over.update_layout(
+            template="plotly_white",
+            height=420,
+            margin=dict(l=10, r=10, t=40, b=10),
+        )
+        st.plotly_chart(fig_over, use_container_width=True)
+
+    with col4:
+        st.write("**ZIPs with negative residuals (actual prices < model prediction)**")
+        fig_under = px.bar(
+            top_under.sort_values("mean_resid"),
+            x="mean_resid",
+            y="ZipName",
+            orientation="h",
+            labels={"mean_resid": "Average residual (log ZHVI)", "ZipName": ""},
+            title="Top 10 Under-performing ZIPs",
+        )
+        fig_under.update_layout(
+            template="plotly_white",
+            height=420,
+            margin=dict(l=10, r=10, t=40, b=10),
+        )
+        st.plotly_chart(fig_under, use_container_width=True)
+
+    st.info(
+        "Residuals measure how much actual log(ZHVI) deviates from the level predicted "
+        "by crime and distance from the Loop. Positive residuals ⇒ relatively stronger "
+        "housing markets than fundamentals alone would suggest."
+    )
+
+    # ---------- 6. Year-by-year crime slope ----------
+    st.markdown("### 6. Year-by-year Effect of Crime on Home Values")
+
+    slope_list = []
+    for year in sorted(model_use["year"].unique()):
+        df_y = model_use[model_use["year"] == year]
+        if df_y["crime_rate"].var() > 0 and df_y["log_zhvi"].var() > 0 and len(df_y) > 5:
+            X_y = df_y[["crime_rate", "distance_from_loop"]]
+            X_y = sm.add_constant(X_y)
+            y_y = df_y["log_zhvi"]
+            try:
+                m_y = sm.OLS(y_y, X_y).fit()
+                slope_list.append(
+                    {
+                        "year": year,
+                        "beta_crime": m_y.params.get("crime_rate", np.nan),
+                        "se_beta": m_y.bse.get("crime_rate", np.nan),
+                        "p_value": m_y.pvalues.get("crime_rate", np.nan),
+                        "r2": m_y.rsquared,
+                    }
+                )
+            except Exception:
+                continue
+
+    slope_df = pd.DataFrame(slope_list)
+    if not slope_df.empty:
+        fig_slope = px.line(
+            slope_df,
+            x="year",
+            y="beta_crime",
+            markers=True,
+            labels={
+                "year": "Year",
+                "beta_crime": "Coefficient on crime_rate (log ZHVI model)",
+            },
+            title="Year-by-year Crime Effect on Home Values (controlling for distance)",
+        )
+        fig_slope.add_hline(y=0, line_dash="dash")
+        fig_slope.update_layout(template="plotly_white", height=420)
+        st.plotly_chart(fig_slope, use_container_width=True)
+
+        st.dataframe(
+            slope_df[["year", "beta_crime", "se_beta", "p_value", "r2"]]
+            .sort_values("year")
+            .style.format(
+                {
+                    "beta_crime": "{:.3f}",
+                    "se_beta": "{:.3f}",
+                    "p_value": "{:.3g}",
+                    "r2": "{:.3f}",
+                }
+            ),
+            use_container_width=True,
         )
     else:
-        df["Label"] = df["ZIP"]
+        st.info("Not enough yearly data to estimate year-by-year slopes robustly.")
 
-    col1, col2 = st.columns([1.3, 1])
+    # ---------- 7. Correlation matrix ----------
+    st.markdown("### 7. ZIP-level Correlation Matrix of Key Features")
 
-    # 散点 + 回归线
-    with col1:
-        fig_scatter = px.scatter(
-            df,
-            x="crime_rate_latest",
-            y="zhvi_latest",
-            color="value_class",
-            hover_name="Label",
-            size="population",
-            labels={
-                "crime_rate_latest": "Crime Rate (per 1000 residents)",
-                "zhvi_latest": "Home Value (latest ZHVI, USD)",
-                "value_class": "Value Category",
-            },
-            title="Home Value vs Crime Rate",
-            color_discrete_sequence=px.colors.qualitative.Set2,
+    corr_base = summary.copy()
+    corr_base["log_mean_zhvi"] = np.log(corr_base["mean_zhvi"])
+
+    corr_vars = ["log_mean_zhvi", "mean_crime_rate", "population", "distance_from_loop"]
+    corr_matrix = corr_base[corr_vars].corr()
+
+    fig_heat = px.imshow(
+        corr_matrix,
+        text_auto=".2f",
+        color_continuous_scale="RdBu_r",
+        zmin=-1,
+        zmax=1,
+        labels=dict(color="Correlation"),
+        title="Correlation Matrix (ZIP-level averages)",
+    )
+    fig_heat.update_layout(template="plotly_white", height=420)
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+
+# -----------------------------
+# Model Residual Map – residual + composite score toggle
+# -----------------------------
+def render_model_residual_map():
+    gdf, _, _, model_df, summary = load_data()
+    geojson = build_geojson()
+
+    st.markdown("## 🗺️ Model Residual & Composite Score Map")
+
+    # --- 1. 拟合 pooled 线性模型，拿到 residual ---
+    model_use = model_df.dropna(subset=["crime_rate", "log_zhvi", "distance_from_loop"]).copy()
+    if model_use.empty:
+        st.warning("Not enough data to estimate the residual model.")
+        return
+
+    X = model_use[["crime_rate", "distance_from_loop"]]
+    X = sm.add_constant(X)
+    y = model_use["log_zhvi"]
+    ols_model = sm.OLS(y, X).fit()
+    model_use["resid"] = ols_model.resid
+
+    # 每个 ZIP 的平均残差
+    zip_resid = (
+        model_use.groupby("ZIP")
+        .agg(
+            mean_resid=("resid", "mean"),
+            mean_zhvi=("Zhvi", "mean"),
+            mean_crime_rate=("crime_rate", "mean"),
         )
-        x_line = np.linspace(df["crime_rate_latest"].min(), df["crime_rate_latest"].max(), 100)
-        y_line = a + b * x_line
-        fig_scatter.add_traces(
-            go.Scatter(
-                x=x_line,
-                y=y_line,
-                mode="lines",
-                name="Regression line",
-                line=dict(dash="dash", color="black"),
-            )
+        .reset_index()
+    )
+
+    # 和 summary（composite_score 等）合并
+    # 注意：summary 里列名是 population，不是 "Population - Total"
+    zip_metrics = summary.merge(zip_resid[["ZIP", "mean_resid"]], on="ZIP", how="left")
+
+    # 把这些指标挂到几何数据上
+    map_df = gdf.merge(
+        zip_metrics[["ZIP", "ZipName", "composite_score", "mean_resid"]],
+        on="ZIP",
+        how="left",
+    )
+
+    # 处理 ZipName_x / ZipName_y 的情况，统一成 ZipName
+    if "ZipName_x" in map_df.columns and "ZipName_y" in map_df.columns:
+        map_df["ZipName"] = map_df["ZipName_x"].fillna(map_df["ZipName_y"])
+    elif "ZipName_x" in map_df.columns:
+        map_df["ZipName"] = map_df["ZipName_x"]
+    elif "ZipName_y" in map_df.columns:
+        map_df["ZipName"] = map_df["ZipName_y"]
+    # 如果只存在 gdf 原来的 ZipName，前面 merge 不会产生 _x/_y，直接用已有的即可
+
+    # --- 2. UI toggle：切换主地图指标 ---
+    col_top1, col_top2 = st.columns([2, 1])
+    with col_top1:
+        primary_metric = st.radio(
+            "Primary map metric",
+            ["Model residual (log ZHVI)", "Composite score"],
+            index=0,
+            horizontal=True,
         )
-        fig_scatter.update_layout(
-            template="simple_white",
-            height=520,
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
-            ),
-        )
-        st.plotly_chart(fig_scatter, use_container_width=True)
-        st.caption(
-            "回归线刻画在城市整体水平下，给定犯罪率时房价的“期望”；"
-            "散点颜色表示实际房价相对这条线是偏便宜还是偏贵。"
+    with col_top2:
+        st.markdown(
+            "Use the toggle to **switch the main map** between residuals and composite "
+            "scores. The secondary map shows the other metric for visual comparison."
         )
 
-    # 残差地图
-    with col2:
-        map_df = gdf.merge(
-            df[["ZIP", "zhvi_resid"]],
-            on="ZIP",
-            how="left",
-        )
-        map_df = map_df[map_df["zhvi_resid"].notna()].copy()
-        if map_df.empty:
-            st.info("No residuals to map.")
-            return
+    if primary_metric == "Model residual (log ZHVI)":
+        main_col = "mean_resid"
+        main_label = "Avg residual (log ZHVI)"
+        main_scale = "RdBu_r"
+        secondary_col = "composite_score"
+        secondary_label = "Composite score"
+        secondary_scale = "Viridis"
+    else:
+        main_col = "composite_score"
+        main_label = "Composite score"
+        main_scale = "Viridis"
+        secondary_col = "mean_resid"
+        secondary_label = "Avg residual (log ZHVI)"
+        secondary_scale = "RdBu_r"
 
-        geojson = json.loads(map_df[["ZIP", "geometry"]].to_json())
+    # 残差地图用对称范围
+    max_abs_resid = np.nanmax(np.abs(map_df["mean_resid"]))
+    if not np.isfinite(max_abs_resid) or max_abs_resid == 0:
+        max_abs_resid = 0.1
 
-        fig_map = px.choropleth_mapbox(
+    hover_data = {
+        "ZIP": True,
+        "ZipName": True,
+        "Population - Total": ":,",     # 来自 gdf
+        "composite_score": ":.2f",
+        "mean_resid": ":.3f",
+    }
+
+    col_map1, col_map2 = st.columns(2)
+
+    # --- 主地图 ---
+    with col_map1:
+        if main_col == "mean_resid":
+            range_color = (-max_abs_resid, max_abs_resid)
+        else:
+            range_color = None
+
+        fig_main = px.choropleth_mapbox(
             map_df,
             geojson=geojson,
             locations="ZIP",
             featureidkey="properties.ZIP",
-            color="zhvi_resid",
-            color_continuous_scale="RdBu_r",
+            color=main_col,
+            hover_name="ZipName",
+            hover_data=hover_data,
+            color_continuous_scale=main_scale,
+            range_color=range_color,
             mapbox_style="carto-positron",
-            center={"lat": center_lat, "lon": center_lon},
-            zoom=9.5,
-            opacity=0.7,
-            hover_name="ZIP",
-            hover_data={"zhvi_resid": ":,.0f"},
-            labels={"zhvi_resid": "Price residual (actual - predicted)"},
+            center={"lat": 41.85, "lon": -87.65},
+            zoom=9.2,
+            opacity=0.85,
         )
-        fig_map.update_layout(
-            height=520,
-            margin=dict(l=0, r=0, t=40, b=0),
-            coloraxis_colorbar=dict(title="Residual"),
+        fig_main.update_layout(
+            margin=dict(r=0, t=40, l=0, b=0),
+            height=620,
+            title=f"Primary Map – {main_label}",
+            coloraxis_colorbar=dict(title=main_label),
+            template="plotly_white",
         )
-        st.plotly_chart(fig_map, use_container_width=True)
-        st.caption(
-            "蓝色区域：相对给定的犯罪率，房价偏便宜；红色区域：房价偏贵。"
+        st.plotly_chart(fig_main, use_container_width=True)
+
+    # --- 副地图 ---
+    with col_map2:
+        if secondary_col == "mean_resid":
+            range_color_sec = (-max_abs_resid, max_abs_resid)
+        else:
+            range_color_sec = None
+
+        fig_sec = px.choropleth_mapbox(
+            map_df,
+            geojson=geojson,
+            locations="ZIP",
+            featureidkey="properties.ZIP",
+            color=secondary_col,
+            hover_name="ZipName",
+            hover_data=hover_data,
+            color_continuous_scale=secondary_scale,
+            range_color=range_color_sec,
+            mapbox_style="carto-positron",
+            center={"lat": 41.85, "lon": -87.65},
+            zoom=9.2,
+            opacity=0.85,
         )
-
-
-def render_trajectory_lab():
-    st.subheader("📈 Trajectories · 安全 & 房价变化轨迹")
-
-    traj_df = build_traj_df(
-        map_data, crime_min_year, crime_max_year, zhvi_min_year, zhvi_max_year
-    )
-    if traj_df.empty:
-        st.warning("No trajectory data available.")
-        return
-
-    # 加名字
-    if "ZipName" in gdf.columns:
-        name_map = (
-            gdf[["ZIP", "ZipName"]]
-            .drop_duplicates()
-            .set_index("ZIP")["ZipName"]
-            .to_dict()
+        fig_sec.update_layout(
+            margin=dict(r=0, t=40, l=0, b=0),
+            height=620,
+            title=f"Secondary Map – {secondary_label}",
+            coloraxis_colorbar=dict(title=secondary_label),
+            template="plotly_white",
         )
-        traj_df["Label"] = traj_df["ZIP"].apply(
-            lambda z: f"{z} – {name_map.get(z, '')}" if name_map.get(z, "") else z
-        )
-    else:
-        traj_df["Label"] = traj_df["ZIP"]
+        st.plotly_chart(fig_sec, use_container_width=True)
 
-    fig_traj = px.scatter(
-        traj_df,
-        x="crime_change",
-        y="zhvi_change_pct",
-        hover_name="Label",
-        labels={
-            "crime_change": "Δ Crime Rate (per 1000 residents)",
-            "zhvi_change_pct": "Home Value Change (%)",
-        },
-        title=f"Change from {crime_min_year}/{zhvi_min_year} to {crime_max_year}/{zhvi_max_year}",
-        color_discrete_sequence=["#0ea5e9"],
-    )
-    fig_traj.add_hline(y=0, line_dash="dash", line_color="gray")
-    fig_traj.add_vline(x=0, line_dash="dash", line_color="gray")
-    fig_traj.update_layout(
-        template="simple_white",
-        height=520,
-    )
-    st.plotly_chart(fig_traj, use_container_width=True)
-    st.caption(
-        "右上角象限：房价上涨且犯罪率上升；左上角：房价上涨但治安改善；"
-        "右下角：房价下跌且治安恶化；左下角：房价下跌但治安改善。"
-    )
+    # --- residual vs composite score 散点图 ---
+    st.markdown("### Residual vs Composite Score")
 
+    scatter_df = zip_metrics.copy()
+    scatter_df = scatter_df.dropna(subset=["composite_score", "mean_resid"])
 
-def render_cluster_lab():
-    st.subheader("🧩 Neighborhood Archetypes · 社区原型聚类")
-    if zip_df.empty:
-        st.warning("No ZIP data for clustering.")
-        return
-
-    k = st.slider("Number of clusters / 聚类数", 3, 7, 4)
-    cluster_df = build_cluster_df(zip_df, gdf, n_clusters=k)
-    if cluster_df.empty:
-        st.warning("No valid ZIPs for clustering.")
-        return
-
-    # Label
-    if "ZipName" in gdf.columns:
-        name_map = (
-            gdf[["ZIP", "ZipName"]]
-            .drop_duplicates()
-            .set_index("ZIP")["ZipName"]
-            .to_dict()
-        )
-        cluster_df["Label"] = cluster_df["ZIP"].apply(
-            lambda z: f"{z} – {name_map.get(z, '')}" if name_map.get(z, "") else z
-        )
-    else:
-        cluster_df["Label"] = cluster_df["ZIP"]
-
-    fig_scatter = px.scatter(
-        cluster_df,
-        x="crime_rate_latest",
-        y="zhvi_latest",
-        color="cluster",
-        hover_name="Label",
-        size="population",
-        labels={
-            "crime_rate_latest": "Crime Rate (per 1000)",
-            "zhvi_latest": "Home Value (ZHVI)",
-            "cluster": "Cluster",
-        },
-        title="Clusters in Safety-Value Space",
-        color_continuous_scale="Viridis",
-    )
-    fig_scatter.update_layout(
-        template="simple_white",
-        height=520,
-    )
-    st.plotly_chart(fig_scatter, use_container_width=True)
-
-    map_df = gdf.merge(cluster_df[["ZIP", "cluster"]], on="ZIP", how="inner")
-    geojson = json.loads(map_df[["ZIP", "geometry"]].to_json())
-    fig_map = px.choropleth_mapbox(
-        map_df,
-        geojson=geojson,
-        locations="ZIP",
-        featureidkey="properties.ZIP",
-        color="cluster",
-        mapbox_style="carto-positron",
-        center={"lat": center_lat, "lon": center_lon},
-        zoom=9.5,
-        opacity=0.75,
-        hover_name="ZIP",
-        labels={"cluster": "Cluster"},
-    )
-    fig_map.update_layout(
-        height=520,
-        margin=dict(l=0, r=0, t=40, b=0),
-    )
-    st.plotly_chart(fig_map, use_container_width=True)
-    st.caption(
-        "每一类代表一种“社区原型”，例如：高房价低犯罪、人口密集但治安一般、边缘低房价高风险区域等。"
-    )
-
-
-def render_relationship_lab():
-    st.markdown("### 🔍 Relationship Lab · 关系探索实验室")
-    st.caption("通过联合人口、房价与犯罪数据，寻找模式与故事。")
-
-    tabs = st.tabs(
-        [
-            "Value vs Safety",
-            "Trajectories",
-            "Neighborhood Archetypes",
-        ]
-    )
-    with tabs[0]:
-        render_value_safety_lab()
-    with tabs[1]:
-        render_trajectory_lab()
-    with tabs[2]:
-        render_cluster_lab()
-
-
-def render_radar_and_ranking():
-    st.markdown("### 📊 ZIP Radar & Ranking · 综合雷达与排名")
-
-    if zip_df.empty:
-        st.warning("No ZIP-level statistics available.")
-        return
-
-    col1, col2 = st.columns([1, 1.2])
-
-    # Radar
-    with col1:
-        st.subheader("📍 ZIP Radar")
-        choices = zip_df.sort_values("ZIP_label")
-        label_to_zip = dict(zip(choices["ZIP_label"], choices["ZIP"]))
-        selected_label = st.selectbox("Choose ZIP:", choices["ZIP_label"].tolist())
-        selected_zip = label_to_zip[selected_label]
-        row = zip_df[zip_df["ZIP"] == selected_zip].iloc[0]
-
-        categories = ["Population Score", "Safety Score", "Home Value Score"]
-        r_vals = [row["pop_score"], row["safety_score"], row["value_score"]]
-        r_vals.append(r_vals[0])
-        theta_vals = categories + [categories[0]]
-
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatterpolar(
-                r=r_vals,
-                theta=theta_vals,
-                fill="toself",
-                line_color="#0ea5e9",
-                fillcolor="rgba(14,165,233,0.2)",
-                name=f"ZIP {selected_label}",
-            )
-        )
-        fig.update_layout(
-            polar=dict(
-                radialaxis=dict(visible=True, range=[0, 1]),
-            ),
-            showlegend=False,
-            margin=dict(l=40, r=40, t=40, b=40),
-            height=420,
-            template="simple_white",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(
-            f"Overall score for **{selected_label}**: `{row['overall_score']:.3f}`"
-        )
-
-    # Ranking
-    with col2:
-        st.subheader("🏆 Top ZIPs by Overall Score")
-        top_n = st.slider("Show Top N ZIPs:", 5, 25, 10)
-        top_df = (
-            zip_df.sort_values("overall_score", ascending=False)
-            .head(top_n)
-            .copy()
-        )
-        top_df = top_df.iloc[::-1].copy()
-
-        fig_rank = px.bar(
-            top_df,
-            x="overall_score",
-            y="ZIP_label",
-            orientation="h",
+    if not scatter_df.empty:
+        fig_sc = px.scatter(
+            scatter_df,
+            x="composite_score",
+            y="mean_resid",
+            hover_name="ZipName",
             hover_data={
+                "ZIP": True,
+                "composite_score": ":.2f",
+                "mean_resid": ":.3f",
+                "mean_zhvi": ":,.0f",
+                "mean_crime_rate": ":.1f",
                 "population": ":,",
-                "crime_rate_latest": ":.2f",
-                "zhvi_latest": ":,.0f",
-                "overall_score": ":.3f",
             },
-            labels={"overall_score": "Overall Score", "ZIP_label": "ZIP"},
-            title="Highest scoring ZIPs · 综合表现最佳区域",
-            color="overall_score",
-            color_continuous_scale="Blues",
-        )
-        fig_rank.update_layout(
-            height=420,
-            margin=dict(l=80, r=30, t=50, b=40),
-            template="simple_white",
-            coloraxis_showscale=False,
-        )
-        st.plotly_chart(fig_rank, use_container_width=True)
-
-        best_row = zip_df.loc[zip_df["overall_score"].idxmax()]
-        best_label = best_row["ZIP_label"]
-        st.success(
-            f"🏅 Current best ZIP: **{best_label}** (score = {best_row['overall_score']:.3f})"
-        )
-
-
-def render_bubble_playground():
-    st.markdown("### 🔵 Bubble Physics Playground · 球体物理游乐场")
-    st.caption(
-        "每个 ZIP 是一颗弹跳的“行星”：半径代表人口或房价，颜色代表安全度或综合得分，"
-        "在物理世界中不断碰撞、挤压。用鼠标悬停查看信息，拖拽推动小球。"
-    )
-
-    size_metric = st.selectbox(
-        "Bubble size metric / 球体大小指标",
-        ["Population", "Home Value (latest)"],
-    )
-    color_metric = st.selectbox(
-        "Bubble color metric / 球体颜色指标",
-        ["Safety Score", "Overall Score"],
-    )
-
-    bubbles = []
-    for _, row in zip_df.iterrows():
-        bubbles.append(
-            {
-                "zip": row["ZIP"],
-                "label": row["ZIP_label"],
-                "population": float(row["population"]),
-                "zhvi_latest": float(row["zhvi_latest"]),
-                "safety_score": float(row["safety_score"]),
-                "overall_score": float(row["overall_score"]),
-            }
-        )
-    bubbles_json = json.dumps(bubbles)
-
-    html_template = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8" />
-    <title>Bubble Playground</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background: radial-gradient(circle at top, #e0f2fe, #0f172a);
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            color: #f9fafb;
-        }
-        #worldContainer {
-            width: 100%;
-            height: 520px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        #worldCanvas {
-            border-radius: 24px;
-            overflow: hidden;
-            box-shadow: 0 24px 60px rgba(15, 23, 42, 0.8);
-            background: radial-gradient(circle at 10% 20%, #1d4ed8 0%, #020617 55%);
-        }
-        #tooltip {
-            position: absolute;
-            pointer-events: none;
-            background: rgba(15,23,42,0.96);
-            color: #e5e7eb;
-            padding: 6px 10px;
-            border-radius: 999px;
-            font-size: 11px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
-            opacity: 0;
-            transform: translate(-50%, -150%);
-            white-space: nowrap;
-        }
-    </style>
-</head>
-<body>
-<div id="worldContainer">
-    <canvas id="worldCanvas" width="960" height="480"></canvas>
-    <div id="tooltip"></div>
-</div>
-<script>
-    const bubbles = __BUBBLES__;
-    const sizeMetric = "__SIZE_METRIC__";
-    const colorMetric = "__COLOR_METRIC__";
-
-    const Engine = Matter.Engine,
-          Render = Matter.Render,
-          Runner = Matter.Runner,
-          World = Matter.World,
-          Bodies = Matter.Bodies,
-          Body = Matter.Body,
-          Mouse = Matter.Mouse,
-          MouseConstraint = Matter.MouseConstraint;
-
-    const engine = Engine.create();
-    const world = engine.world;
-    world.gravity.y = 0;
-
-    const canvas = document.getElementById('worldCanvas');
-    const render = Render.create({
-        canvas: canvas,
-        engine: engine,
-        options: {
-            width: canvas.width,
-            height: canvas.height,
-            wireframes: false,
-            background: 'transparent'
-        }
-    });
-
-    const width = canvas.width;
-    const height = canvas.height;
-
-    const walls = [
-        Bodies.rectangle(width/2, -40, width, 80, { isStatic: true }),
-        Bodies.rectangle(width/2, height+40, width, 80, { isStatic: true }),
-        Bodies.rectangle(-40, height/2, 80, height, { isStatic: true }),
-        Bodies.rectangle(width+40, height/2, 80, height, { isStatic: true })
-    ];
-    World.add(world, walls);
-
-    function scaleValue(value, min, max, outMin, outMax) {
-        if (max === min) return (outMin + outMax) / 2;
-        const r = (value - min) / (max - min);
-        return outMin + r * (outMax - outMin);
-    }
-
-    const sizeVals = bubbles.map(b => sizeMetric === "Population" ? b.population : b.zhvi_latest);
-    const sizeMin = Math.min(...sizeVals);
-    const sizeMax = Math.max(...sizeVals);
-
-    const colorVals = bubbles.map(b => colorMetric === "Safety Score" ? b.safety_score : b.overall_score);
-    const colorMin = Math.min(...colorVals);
-    const colorMax = Math.max(...colorVals);
-
-    function colorForScore(s) {
-        const t = (s - colorMin) / (colorMax - colorMin || 1);
-        const h = 140 * t;
-        return `hsl(${h}, 85%, 55%)`;
-    }
-
-    const bodies = [];
-
-    bubbles.forEach((b, i) => {
-        const metricValue = sizeMetric === "Population" ? b.population : b.zhvi_latest;
-        const radius = scaleValue(metricValue, sizeMin, sizeMax, 12, 40);
-
-        const angle = (2 * Math.PI / bubbles.length) * i;
-        the_r = Math.min(width, height) / 3;
-        const x = width/2 + the_r * Math.cos(angle);
-        const y = height/2 + the_r * Math.sin(angle);
-
-        const body = Bodies.circle(x, y, radius, {
-            restitution: 0.9,
-            frictionAir: 0.03,
-            friction: 0.01,
-            render: {
-                fillStyle: colorForScore(
-                    colorMetric === "Safety Score" ? b.safety_score : b.overall_score
-                ),
-                strokeStyle: "rgba(15,23,42,0.9)",
-                lineWidth: 1.5
-            }
-        });
-        body.customData = b;
-        bodies.push(body);
-    });
-
-    World.add(world, bodies);
-
-    bodies.forEach((body, i) => {
-        const angle = (2 * Math.PI / bodies.length) * i;
-        const speed = 0.7;
-        Body.setVelocity(body, {
-            x: speed * Math.cos(angle + Math.PI/4),
-            y: speed * Math.sin(angle + Math.PI/4)
-        });
-    });
-
-    const mouse = Mouse.create(canvas);
-    const mouseConstraint = MouseConstraint.create(engine, {
-        mouse: mouse,
-        constraint: {
-            stiffness: 0.16,
-            render: { visible: false }
-        }
-    });
-    World.add(world, mouseConstraint);
-
-    const tooltip = document.getElementById('tooltip');
-
-    Matter.Events.on(mouseConstraint, 'mousemove', function(event) {
-        const mousePos = event.mouse.position;
-        let found = null;
-        for (const b of bodies) {
-            const dx = b.position.x - mousePos.x;
-            const dy = b.position.y - mousePos.y;
-            const dist = Math.sqrt(dx*dx + dy*dy);
-            if (dist <= b.circleRadius) {
-                found = b;
-                break;
-            }
-        }
-        if (found && found.customData) {
-            const d = found.customData;
-            tooltip.style.opacity = 1;
-            tooltip.style.left = mousePos.x + 'px';
-            tooltip.style.top = mousePos.y + 'px';
-            tooltip.innerHTML =
-                d.label +
-                '<br/>Pop ' + d.population.toLocaleString() +
-                '<br/>Zhvi ' + (d.zhvi_latest > 0 ? '$' + d.zhvi_latest.toLocaleString() : 'N/A') +
-                '<br/>Safety ' + d.safety_score.toFixed(2) +
-                ' · Overall ' + d.overall_score.toFixed(2);
-        } else {
-            tooltip.style.opacity = 0;
-        }
-    });
-
-    Render.run(render);
-    const runner = Runner.create();
-    Runner.run(runner, engine);
-</script>
-</body>
-</html>
-"""
-    html = (
-        html_template.replace("__BUBBLES__", bubbles_json)
-        .replace("__SIZE_METRIC__", size_metric)
-        .replace("__COLOR_METRIC__", color_metric)
-    )
-    components.html(html, height=540, scrolling=False)
-
-
-def render_bar_chart_race():
-    st.markdown("### 🏃‍♀️ Bar Chart Race · 排名赛跑")
-
-    race_type = st.selectbox(
-        "Race variable / 比赛变量",
-        ["Home Value (ZHVI)", "Crime Rate"],
-    )
-
-    # Build a readable ZIP label (ZIP + ZipName when available)
-    if "ZipName" in zip_df.columns:
-        name_map = (
-            zip_df[["ZIP", "ZipName"]]
-            .drop_duplicates()
-            .set_index("ZIP")["ZipName"]
-            .to_dict()
-        )
-    else:
-        name_map = {}
-
-    if race_type == "Home Value (ZHVI)":
-        df = race_zhvi_df.copy()
-        df = df[df["Zhvi"] > 0]
-        if not df.empty:
-            df["ZipLabel"] = df["ZIP"].apply(
-                lambda z: f"{z} – {name_map.get(z, '')}" if name_map.get(z, "") else z
-            )
-            # Sort within each year so rankings move over time
-            df = df.sort_values(["Year", "Zhvi"])
-        st.caption("房价随时间的排名变化 · ZHVI bar chart race")
-        fig = px.bar(
-            df,
-            x="Zhvi",
-            y="ZipLabel",
-            color="ZIP",
-            orientation="h",
-            animation_frame="Year",
-            range_x=[0, df["Zhvi"].max() * 1.1],
+            trendline="ols",
             labels={
-                "Zhvi": "Average Home Value (USD)",
-                "ZipLabel": "ZIP & Neighborhood",
+                "composite_score": "Composite score (higher = better)",
+                "mean_resid": "Avg residual (log ZHVI)",
             },
-            title="Home Value Race · 房价排名赛跑",
+            title="Model Residual vs Composite Score (ZIP-level)",
         )
+        fig_sc.update_layout(template="plotly_white", height=460)
+        st.plotly_chart(fig_sc, use_container_width=True)
     else:
-        df = race_crime_df.copy()
-        if not df.empty:
-            df["ZipLabel"] = df["ZIP"].apply(
-                lambda z: f"{z} – {name_map.get(z, '')}" if name_map.get(z, "") else z
-            )
-            df = df.sort_values(["Year", "CrimeRate"])
-        st.caption("犯罪率随时间的排名变化 · Crime Rate bar chart race")
-        fig = px.bar(
-            df,
-            x="CrimeRate",
-            y="ZipLabel",
-            color="ZIP",
-            orientation="h",
-            animation_frame="Year",
-            range_x=[0, df["CrimeRate"].max() * 1.1],
-            labels={
-                "CrimeRate": "Crime Rate (per 1000 residents)",
-                "ZipLabel": "ZIP & Neighborhood",
-            },
-            title="Crime Rate Race · 犯罪率排名赛跑",
-        )
+        st.info("Not enough data to compute residual vs composite scatter.")
 
-    fig.update_layout(
-        template="simple_white",
-        height=620,
-        margin=dict(l=80, r=40, t=60, b=40),
-        xaxis=dict(
-            showgrid=True,
-            gridcolor="rgba(148,163,184,0.35)",
-            gridwidth=1,
-        ),
-        yaxis=dict(categoryorder="category ascending"),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def render_orbit_view():
-    st.markdown("### 🪐 Orbit View · 城市“行星系统”")
-    st.caption(
-        "以市中心为“太阳”，每个 ZIP 是一颗行星：距离代表与市中心的距离，大小代表房价，颜色代表安全度。"
+    st.info(
+        "- **Composite score** combines value, crime, population and location.\n"
+        "- **Residual** tells you whether prices are higher or lower than the model "
+        "predicts, *after* controlling for crime and distance.\n"
+        "You can look for ZIPs with **high composite score + positive residual** as "
+        "“strong fundamentals + market enthusiasm”."
     )
 
-    orbit_df = gdf.merge(
-        zip_df[["ZIP", "safety_score", "zhvi_latest"]], on="ZIP", how="left"
-    )
-    orbit_df = orbit_df.dropna(subset=["safety_score", "zhvi_latest"])
 
-    if orbit_df.empty:
-        st.warning("No data for orbit view.")
-        return
-
-    orbit_df = orbit_df.sort_values("ZIP")
-    orbit_df["angle_index"] = range(len(orbit_df))
-    orbit_df["theta"] = orbit_df["angle_index"] / len(orbit_df) * 360
-
-    fig = px.scatter_polar(
-        orbit_df,
-        r="distance_from_loop",
-        theta="theta",
-        size="zhvi_latest",
-        color="safety_score",
-        hover_name="ZIP",
-        color_continuous_scale="Blues",
-        size_max=40,
-        title="Chicago ZIPs Orbiting the Loop",
-    )
-    fig.update_layout(
-        template="simple_white",
-        height=680,
-        margin=dict(l=40, r=40, t=80, b=40),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def render_adjacency_network():
-    st.markdown("### 🕸️ Adjacency Network · 邻接关系网络图")
-    st.caption(
-        "每个节点是 ZIP，相邻的 ZIP 用线连接；节点大小代表综合得分，颜色代表安全度。"
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    st.sidebar.title("Chicago Housing & Crime Dashboard")
+    page = st.sidebar.radio(
+        "Navigate",
+        [
+            "Overview Map",
+            "ZIP Explorer",
+            "Radar & Rankings",
+            "Model Residual Map",
+            "Creative Bubble Lab",
+            "Statistical Analysis",
+        ],
     )
 
-    html_template = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8" />
-    <title>ZIP Adjacency Network</title>
-    <script src="https://d3js.org/d3.v7.min.js"></script>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background: radial-gradient(circle at top left, #e5e7eb, #020617);
-            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-        }
-        #network {
-            width: 100%;
-            height: 620px;
-        }
-        .node text {
-            pointer-events: none;
-            font-size: 10px;
-            fill: #e5e7eb;
-        }
-        .tooltip {
-            position: absolute;
-            pointer-events: none;
-            background: rgba(15,23,42,0.96);
-            color: #e5e7eb;
-            padding: 6px 10px;
-            border-radius: 8px;
-            font-size: 11px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.6);
-            opacity: 0;
-            transform: translate(-50%, -140%);
-        }
-    </style>
-</head>
-<body>
-<div id="network"></div>
-<div id="tooltip" class="tooltip"></div>
-<script>
-    const nodesData = __NODES_DATA__;
-    const linksData = __LINKS_DATA__;
-
-    const width = document.getElementById('network').clientWidth;
-    const height = 620;
-
-    const svg = d3.select('#network')
-        .append('svg')
-        .attr('width', width)
-        .attr('height', height);
-
-    const tooltip = d3.select('#tooltip');
-
-    const sizeVals = nodesData.map(d => d.overall_score);
-    const sizeMin = d3.min(sizeVals);
-    const sizeMax = d3.max(sizeVals);
-
-    const sizeScale = d3.scaleLinear()
-        .domain([sizeMin, sizeMax])
-        .range([8, 28]);
-
-    const colorScale = d3.scaleSequential(d3.interpolateBlues)
-        .domain([0, 1]);
-
-    const nodes = nodesData.map(d => Object.assign({}, d));
-    const links = linksData.map(d => Object.assign({}, d));
-
-    const nodeById = new Map(nodes.map(d => [d.ZIP, d]));
-    links.forEach(l => {
-        l.source = nodeById.get(l.source);
-        l.target = nodeById.get(l.target);
-    });
-
-    const simulation = d3.forceSimulation(nodes)
-        .force('link', d3.forceLink(links).distance(60).strength(0.7))
-        .force('charge', d3.forceManyBody().strength(-80))
-        .force('center', d3.forceCenter(width / 2, height / 2))
-        .force('collision', d3.forceCollide().radius(d => sizeScale(d.overall_score) + 3));
-
-    const link = svg.append('g')
-        .attr('stroke', '#64748b')
-        .attr('stroke-opacity', 0.45)
-        .attr('stroke-width', 1)
-        .selectAll('line')
-        .data(links)
-        .enter()
-        .append('line');
-
-    const node = svg.append('g')
-        .selectAll('g')
-        .data(nodes)
-        .enter()
-        .append('g')
-        .call(
-            d3.drag()
-                .on('start', dragStarted)
-                .on('drag', dragged)
-                .on('end', dragEnded)
-        );
-
-    node.append('circle')
-        .attr('r', d => sizeScale(d.overall_score))
-        .attr('fill', d => colorScale(d.safety_score))
-        .attr('stroke', '#020617')
-        .attr('stroke-width', 1.2);
-
-    node.append('text')
-        .text(d => d.ZIP)
-        .attr('dy', 3)
-        .attr('text-anchor', 'middle');
-
-    node.on('mousemove', (event, d) => {
-        tooltip.style('opacity', 1)
-            .style('left', event.pageX + 'px')
-            .style('top', event.pageY + 'px')
-            .html(
-                'ZIP ' + d.ZIP +
-                '<br/>Overall: ' + d.overall_score.toFixed(3) +
-                '<br/>Safety: ' + d.safety_score.toFixed(3)
-            );
-    }).on('mouseout', () => {
-        tooltip.style('opacity', 0);
-    });
-
-    simulation.on('tick', () => {
-        link
-            .attr('x1', d => d.source.x)
-            .attr('y1', d => d.source.y)
-            .attr('x2', d => d.target.x)
-            .attr('y2', d => d.target.y);
-
-        node.attr('transform', d => `translate(${d.x}, ${d.y})`);
-    });
-
-    function dragStarted(event, d) {
-        if (!event.active) simulation.alphaTarget(0.3).restart();
-        d.fx = d.x;
-        d.fy = d.y;
-    }
-
-    function dragged(event, d) {
-        d.fx = event.x;
-        d.fy = event.y;
-    }
-
-    function dragEnded(event, d) {
-        if (!event.active) simulation.alphaTarget(0);
-        d.fx = null;
-        d.fy = null;
-    }
-</script>
-</body>
-</html>
-    """
-    html = (
-        html_template.replace("__NODES_DATA__", json.dumps(nodes_json))
-        .replace("__LINKS_DATA__", json.dumps(links_json))
-    )
-    components.html(html, height=640, scrolling=False)
+    if page == "Overview Map":
+        render_overview_map()
+    elif page == "ZIP Explorer":
+        render_zip_explorer()
+    elif page == "Radar & Rankings":
+        render_radar_rankings()
+    elif page == "Model Residual Map":
+        render_model_residual_map()
+    elif page == "Creative Bubble Lab":
+        render_creative_bubbles()
+    elif page == "Statistical Analysis":
+        render_statistical_analysis()
 
 
-# ============ 页面路由 ============
+if __name__ == "__main__":
+    main()
 
-st.sidebar.title("🏙️ Chicago ZIP Visual Playground")
 
-view_mode = st.sidebar.radio(
-    "Choose a view / 选择视图",
-    [
-        "Overview Map",
-        "Relationship Lab",
-        "Radar & Ranking",
-        "Bubble Playground",
-        "Bar Chart Race",
-        "Orbit View",
-        "Adjacency Network",
-    ],
-)
-
-st.title("🌆 Chicago ZIP Visual Playground")
-st.write(
-    "将人口、房价和犯罪数据结合，用地图与艺术感图形探索芝加哥不同 ZIP 社区的结构与故事。"
-)
-
-if view_mode == "Overview Map":
-    render_overview_map()
-elif view_mode == "Relationship Lab":
-    render_relationship_lab()
-elif view_mode == "Radar & Ranking":
-    render_radar_and_ranking()
-elif view_mode == "Bubble Playground":
-    render_bubble_playground()
-elif view_mode == "Bar Chart Race":
-    render_bar_chart_race()
-elif view_mode == "Orbit View":
-    render_orbit_view()
-elif view_mode == "Adjacency Network":
-    render_adjacency_network()

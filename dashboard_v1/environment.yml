@@ -1,0 +1,21 @@
+name: chicago_zip_py311
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+
+  - numpy
+  - pandas
+
+  - geopandas
+  - shapely
+  - fiona
+  - pyproj
+  - gdal
+
+  - scikit-learn
+  - statsmodels
+
+  - streamlit
+  - plotly
