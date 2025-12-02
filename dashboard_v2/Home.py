@@ -12,15 +12,23 @@ st.title("📌 Chicago Housing and Crime Dashboard")
 st.markdown("""
 Welcome to the Chicago Housing and Crime Dashboard! This interactive application allows you to explore:
 
-### 📊 Key Variables (Maps)
-- **Population** - View population distribution across Chicago ZIP codes (2021 data)
-- **Crime Rate** - Explore crime rates per 1,000 residents with animated timeline (2001-2024)
-- **Housing Prices** - Track home value changes over time (2000-2024)
+### 🧭 How the dashboard is organized
 
-### 💡 Insights
-- **Insight 1** - Coming soon
-- **Insight 2** - Coming soon  
-- **Insight 3** - Coming soon
+#### 1. Core maps
+- **📊 Population** – View population distribution across Chicago ZIP codes (2021 Census).
+- **🚨 Crime Rate** – Explore crime counts and crime rates per 1,000 residents over time.
+- **🏠 Housing Prices** – Track ZIP-level home value changes (ZHVI, 2000–2024).
+
+#### 2. Relationship & insight tools
+- **💡 Relationship Lab** – Experiment with how crime, population, and home values move together across ZIP codes and over time.
+- **🎯 Statistical Analysis** – Run pooled regression models with year fixed effects, ZIP clustering, and time-series diagnostics.
+- **🌆 Other Cool Visualizations** – Explore scoring-based neighborhood rankings, network-style connectivity, and orbit-style views around the Loop.
+- **💬 Chatbox** – Ask natural-language questions about crime, home values, and our statistical findings; answers are grounded in the same data and models.
+
+### 🔧 Shared controls
+- Use the **Settings** panel in the sidebar to:
+  - Exclude specific ZIP codes (e.g., airport or PO-box ZIPs).
+  - Optionally exclude **year 2025** to keep analyses focused on stable historical data.
 
 ---
 
@@ -39,10 +47,16 @@ st.subheader("Quick Start")
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.info("🗺️ **Population Map**\n\nStart with the population distribution to understand Chicago's demographics.")
+    st.info(
+        "🗺️ **Core Maps**\n\nBegin with Population, Crime Rate, and Housing Prices to get a feel for the data across ZIP codes and over time."
+    )
     
 with col2:
-    st.info("🚨 **Crime Analysis**\n\nExplore crime trends over 20+ years with interactive animations.")
+    st.info(
+        "💡 **Relationship Lab & Stats**\n\nThen open the Relationship Lab and Statistical Analysis tabs to see how crime and home values relate, including regression results."
+    )
     
 with col3:
-    st.info("🏠 **Housing Prices**\n\nTrack how home values have changed across different neighborhoods.")
+    st.info(
+        "💬 **Insight Chatbox**\n\nUse the Chatbox to ask follow-up questions in plain language, powered by the same data and statistical summaries."
+    )
