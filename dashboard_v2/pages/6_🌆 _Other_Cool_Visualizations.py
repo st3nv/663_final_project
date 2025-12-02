@@ -1,14 +1,21 @@
 # pages/6_💡_Other_Cool_Visualizations.py
 import json
 import os
+import sys
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 from shapely.geometry import Point
+
+# Add parent directory to path for shared utils
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils.data_loader import get_exclude_settings, apply_zip_exclusion  # type: ignore
 
 
 st.set_page_config(
@@ -31,13 +38,27 @@ def normalize_series(s: pd.Series, reverse: bool = False) -> pd.Series:
     return 1.0 - scaled if reverse else scaled
 
 
+def score_to_radar(score: float) -> float:
+    """Convert a 0–1 score to a 0–10 radar scale."""
+    return float(np.clip(score * 10.0, 0.0, 10.0))
+
+
 @st.cache_data
-def load_data():
-    """Load and prepare core ZIP-level data used by all three visualizations."""
+def load_data(exclude_zips, exclude_2025):
+    """Load and prepare core ZIP-level data used by all three visualizations.
+
+    `exclude_zips` is an iterable of ZIP codes (strings) to drop entirely.
+    If `exclude_2025` is True, any 2025 values are removed from crime/ZHVI before
+    computing year ranges and latest-year metrics.
+    """
     # Geo with ZipName when available
     geojson_path = os.path.join("data", "chicago_zipcodes.geojson")
     gdf = gpd.read_file(geojson_path)
     gdf["ZIP"] = gdf["ZIP"].astype(str)
+
+    # Apply ZIP exclusions to the geometry layer
+    if exclude_zips:
+        gdf = apply_zip_exclusion(gdf, list(exclude_zips))
 
     # Population (2021)
     pop_df = pd.read_csv(os.path.join("data", "Chicago_Population_Counts.csv"))
@@ -53,6 +74,8 @@ def load_data():
     # Crime
     crime_df = pd.read_csv(os.path.join("data", "chicago_crime_preprocessed.csv"))
     crime_df["ZIP"] = crime_df["ZIP"].astype(str)
+    if exclude_2025 and "year" in crime_df.columns:
+        crime_df = crime_df[crime_df["year"] != 2025]
     crime_min_year = int(crime_df["year"].min())
     crime_max_year = int(crime_df["year"].max())
 
@@ -70,6 +93,8 @@ def load_data():
     # Housing (ZHVI)
     zhvi_df = pd.read_csv(os.path.join("data", "chicago_zhvi_preprocessed.csv"))
     zhvi_df["RegionName"] = zhvi_df["RegionName"].astype(str)
+    if exclude_2025 and "Year" in zhvi_df.columns:
+        zhvi_df = zhvi_df[zhvi_df["Year"] != 2025]
     zhvi_min_year = int(zhvi_df["Year"].min())
     zhvi_max_year = int(zhvi_df["Year"].max())
 
@@ -161,7 +186,10 @@ def load_data():
     )
 
 
-# ============ Load data & derive scores ============ #
+# ============ Sidebar filters & load data ============ #
+st.sidebar.header("📌 Dashboard")
+exclude_zips, exclude_2025 = get_exclude_settings()
+
 (
     gdf,
     map_data,
@@ -170,11 +198,10 @@ def load_data():
     crime_max_year,
     zhvi_min_year,
     zhvi_max_year,
-) = load_data()
+) = load_data(tuple(exclude_zips), exclude_2025)
 
 
 # Sidebar settings for overall score weights
-st.sidebar.header("📌 Dashboard")
 
 # Initialize default weights in session state
 if "w_pop" not in st.session_state:
@@ -183,6 +210,9 @@ if "w_safety" not in st.session_state:
     st.session_state["w_safety"] = 1.0
 if "w_value" not in st.session_state:
     st.session_state["w_value"] = 1.0
+if "home_value_direction" not in st.session_state:
+    # Default: more affordable (lower ZHVI) gets higher score
+    st.session_state["home_value_direction"] = "Lower (more affordable) = better score"
 
 def _reset_score_weights():
     st.session_state["w_pop"] = 1.0
@@ -214,6 +244,18 @@ with st.sidebar.expander("⚙️ Score Settings", expanded=True):
         step=0.1,
         key="w_value",
     )
+    value_direction = st.radio(
+        "Home value direction in score",
+        options=[
+            "Higher prices = better score",
+            "Lower (more affordable) = better score",
+        ],
+        key="home_value_direction",
+        help=(
+            "Choose whether higher home values or more affordability should increase "
+            "the home value score."
+        ),
+    )
     st.button("Reset weights", on_click=_reset_score_weights)
 
     total_w = w_pop + w_safety + w_value
@@ -236,7 +278,14 @@ if not zip_df.empty:
     # Spread safety more evenly: use percentile rank of crime rate (lower crime → higher safety_score)
     safety_rank = zip_df["crime_rate_latest"].rank(pct=True, method="average")
     zip_df["safety_score"] = 1.0 - safety_rank
-    zip_df["value_score"] = normalize_series(zip_df["zhvi_latest"], reverse=True)
+    reverse_value = st.session_state.get(
+        "home_value_direction",
+        "Lower (more affordable) = better score",
+    ) == "Lower (more affordable) = better score"
+    zip_df["value_score"] = normalize_series(
+        zip_df["zhvi_latest"],
+        reverse=reverse_value,
+    )
     zip_df["overall_score"] = (
         pop_w_norm * zip_df["pop_score"]
         + saf_w_norm * zip_df["safety_score"]
@@ -272,6 +321,114 @@ links_json = json.dumps(neighbors)
 
 
 # ============ Views ============ #
+
+def render_radar_rankings():
+    st.markdown("### 🧭 Multi-metric Radar & Rankings")
+
+    if zip_df.empty:
+        st.info("No ZIP-level data available for rankings.")
+        return
+
+    # Join distance-from-Loop for proximity scoring
+    radar_df = gdf[["ZIP", "distance_from_loop"]].merge(
+        zip_df,
+        on="ZIP",
+        how="inner",
+    )
+    if radar_df.empty:
+        st.info("No overlapping ZIPs for rankings.")
+        return
+
+    radar_df = radar_df.copy()
+    radar_df["proximity_score"] = normalize_series(
+        radar_df["distance_from_loop"],
+        reverse=True,
+    )
+
+    # Always focus on the top 5 ZIPs by overall score (no filters)
+    ranked = radar_df.sort_values("overall_score", ascending=False).head(5)
+    if ranked.empty:
+        st.info("No ZIPs available for rankings.")
+        return
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        fig_bar = px.bar(
+            ranked,
+            x="overall_score",
+            y="ZIP_label",
+            orientation="h",
+            color="overall_score",
+            color_continuous_scale="Tealgrn",
+            labels={"overall_score": "Overall score", "ZIP_label": ""},
+            title="Top ZIPs by Overall Score (higher = better)",
+        )
+        fig_bar.update_layout(
+            template="simple_white",
+            height=520,
+            yaxis=dict(autorange="reversed"),
+            margin=dict(l=10, r=10, t=60, b=10),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    with col2:
+        value_direction = st.session_state.get(
+            "home_value_direction",
+            "Lower (more affordable) = better score",
+        )
+        if value_direction == "Higher prices = better score":
+            hv_line = "- Higher home values (ZHVI) ↑"
+        else:
+            hv_line = "- More affordable (lower ZHVI) ↑"
+
+        st.markdown("**How is the score constructed?**")
+        st.markdown(
+            f"{hv_line}\n"
+            "- Lower crime rate ↑\n"
+            "- Higher population (market size) ↑\n"
+            "- Closer to the Loop (proximity) ↑\n"
+            "All components are scaled to 0–1 scores and combined using the weights from the sidebar."
+        )
+
+    st.markdown("### 🕸 Radar View for Top 5 ZIPs")
+    categories = [
+        "Home Value",
+        "Crime Safety",
+        "Population Size",
+        "Proximity to Loop",
+    ]
+    categories_closed = categories + [categories[0]]
+
+    fig_rad = go.Figure()
+    for _, row in ranked.iterrows():
+        values = [
+            score_to_radar(float(row["value_score"])),
+            score_to_radar(float(row["safety_score"])),
+            score_to_radar(float(row["pop_score"])),
+            score_to_radar(float(row["proximity_score"])),
+        ]
+        values.append(values[0])
+
+        fig_rad.add_trace(
+            go.Scatterpolar(
+                r=values,
+                theta=categories_closed,
+                fill="toself",
+                name=row["ZIP_label"],
+                line=dict(width=2),
+                opacity=0.5,
+            )
+        )
+    fig_rad.update_layout(
+        template="simple_white",
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 10]),
+        ),
+        showlegend=True,
+        height=420,
+        title="Multi-dimensional Profiles of Top 5 ZIPs",
+    )
+    st.plotly_chart(fig_rad, use_container_width=True)
 
 def render_bubble_playground():
     st.markdown("### 🔵 Bubble Playground")
@@ -921,13 +1078,13 @@ st.write(
     "They combine population, home values, crime rates, and neighborhood adjacency into "
     "simple, minimalist visual stories.\n"
     "- **Safety score** = `1 - percentile_rank(crime_rate_latest)` (lower crime → higher safety, better color spread). \n"
-    "- **Population score** = 0-1 normalized population (higher population → higher score). \n"
-    "- **Home value score** = reversed 0-1 normalized latest average home value (higher value → lower score). \n"
+    "- **Population score** = 0–1 normalized population (higher population → higher score). \n"
+    "- **Home value score** = 0–1 normalized latest average home value; whether **higher prices** or **more affordability** get a higher score is controlled by the sidebar setting. \n"
     "- **Overall score** is a weighted mix of population, safety, and home value scores (weights set in the sidebar)."
 )
 
-tab_bubble, tab_orbit = st.tabs(
-    ["Bubble Playground", "Orbit View"]
+tab_radar, tab_orbit, tab_bubble = st.tabs(
+    ["Radar & Rankings", "Orbit View", "Bubble Playground"]
 )
 
 with tab_bubble:
@@ -935,3 +1092,6 @@ with tab_bubble:
 
 with tab_orbit:
     render_orbit_view()
+
+with tab_radar:
+    render_radar_rankings()
