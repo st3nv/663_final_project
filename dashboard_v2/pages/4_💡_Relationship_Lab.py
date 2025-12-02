@@ -52,6 +52,18 @@ map_data, gdf_merged, crime_min_year, crime_max_year, zhvi_min_year, zhvi_max_ye
     gdf, crime_df, zhvi_df, pop_df
 )
 
+# Simple distance-from-Loop measure using centroids (degree space)
+LOOP_LAT, LOOP_LON = 41.8781, -87.6298
+distance_from_loop_map = {}
+for z in map_data:
+    try:
+        lat = float(z.get("centroid_lat", 0.0))
+        lon = float(z.get("centroid_lng", 0.0))
+    except (TypeError, ValueError):
+        continue
+    dist = np.sqrt((lat - LOOP_LAT) ** 2 + (lon - LOOP_LON) ** 2)
+    distance_from_loop_map[str(z["zip"])] = float(dist)
+
 
 def build_zip_df(map_data_list, gdf_frame, crime_latest_year, zhvi_latest_year):
     """Construct a ZIP-level dataframe with latest crime rate and home value."""
@@ -147,6 +159,50 @@ def build_traj_df(map_data_list, crime_start, crime_end, zhvi_start, zhvi_end):
     return df
 
 
+def build_distance_zhvi_df(map_data_list, distance_lookup, zhvi_start, zhvi_end):
+    """Long-form dataframe of ZHVI vs distance-from-Loop over time."""
+    records = []
+    for z in map_data_list:
+        zip_code = str(z["zip"])
+        pop_val = float(z.get("population", 0.0) or 0.0)
+        if pop_val <= 0:
+            continue
+
+        dist = distance_lookup.get(zip_code)
+        if dist is None:
+            continue
+
+        zip_name = z.get("zipName") or ""
+
+        for year in range(zhvi_start, zhvi_end + 1):
+            zhvi_y = float(z["zhvi"].get(str(year), 0.0))
+            if zhvi_y <= 0:
+                continue
+
+            records.append(
+                {
+                    "ZIP": zip_code,
+                    "ZipName": zip_name,
+                    "year": int(year),
+                    "distance_from_loop": float(dist),
+                    "Zhvi": zhvi_y,
+                    "population": pop_val,
+                }
+            )
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+    df["Label"] = df.apply(
+        lambda r: f"{r['ZIP']} – {r['ZipName']}"
+        if isinstance(r["ZipName"], str) and r["ZipName"]
+        else r["ZIP"],
+        axis=1,
+    )
+    return df
+
+
 zip_df = build_zip_df(map_data, gdf_merged, crime_max_year, zhvi_max_year)
 
 tabs = st.tabs(
@@ -154,7 +210,7 @@ tabs = st.tabs(
         "Value vs Safety",
         "Value vs Safety Animated",
         "Trajectories",
-        "Neighborhood Archetypes",
+        "Value vs Distance from Loop",
     ]
 )
 
@@ -1134,443 +1190,137 @@ with tabs[2]:
 
 
 with tabs[3]:
-    st.subheader("🧩 Neighborhood Archetypes")
+    st.subheader("🧭 Home Value vs Distance from the Loop")
     st.markdown(
-        "This tab groups ZIPs conceptually by crime and home value levels. "
-        "A full clustering view (with ML-based clusters and maps) can be added later if needed."
+        "This view shows each ZIP as a bubble in a simple distance–value space, "
+        "and lets you see how the relationship between proximity to the Loop and home values "
+        "changes over time."
     )
 
-    if zip_df.empty:
-        st.warning("No ZIP-level statistics available.")
+    dist_df = build_distance_zhvi_df(
+        map_data, distance_from_loop_map, zhvi_min_year, zhvi_max_year
+    )
+
+    if dist_df.empty:
+        st.warning("No distance and ZHVI data available for the current filters.")
     else:
-        df = zip_df.copy()
+        years_available = sorted(dist_df["year"].unique())
+        year_min = int(years_available[0])
+        year_max = int(years_available[-1])
 
-        # Simple archetype classification by median splits
-        crime_med = df["crime_rate_latest"].median()
-        zhvi_med = df["zhvi_latest"].median()
-
-        def classify_row(r):
-            if r["crime_rate_latest"] <= crime_med and r["zhvi_latest"] >= zhvi_med:
-                return "High value / safer"
-            if r["crime_rate_latest"] > crime_med and r["zhvi_latest"] >= zhvi_med:
-                return "High value / riskier"
-            if r["crime_rate_latest"] <= crime_med and r["zhvi_latest"] < zhvi_med:
-                return "Lower value / safer"
-            return "Lower value / riskier"
-
-        df["archetype"] = df.apply(classify_row, axis=1)
-
-        chart = (
-            alt.Chart(df)
-            .mark_circle(opacity=0.85)
-            .encode(
-                x=alt.X(
-                    "crime_rate_latest:Q",
-                    title="Crime rate (per 1,000 residents)",
-                ),
-                y=alt.Y(
-                    "zhvi_latest:Q",
-                    title="Home value (latest ZHVI, USD)",
-                ),
-                color=alt.Color("archetype:N", title="Archetype"),
-                size=alt.Size(
-                    "population:Q",
-                    title="Population",
-                    legend=None,
-                    scale=alt.Scale(range=[40, 900]),
-                ),
-                tooltip=[
-                    "ZIP",
-                    "ZipName",
-                    alt.Tooltip("population:Q", title="Population", format=","),
-                    alt.Tooltip(
-                        "crime_rate_latest:Q",
-                        title="Crime rate (per 1,000)",
-                        format=".2f",
-                    ),
-                    alt.Tooltip(
-                        "zhvi_latest:Q",
-                        title="Home value (ZHVI)",
-                        format=",.0f",
-                    ),
-                    "archetype",
-                ],
-            )
-        ).properties(height=420)
-
-        st.altair_chart(chart, use_container_width=True)
-
-        st.caption(
-            "Archetypes are defined by whether a ZIP is above/below the city median "
-            "for crime rate and home value."
+        selected_year = st.slider(
+            "Select year",
+            min_value=year_min,
+            max_value=year_max,
+            value=year_max,
+            step=1,
         )
 
-        # --- JS map: Neighborhood Archetypes by ZIP (Leaflet) ---
-        archetype_by_zip = {
-            str(row["ZIP"]): row["archetype"] for _, row in df.iterrows()
-        }
-
-        zipname_by_zip = {}
-        if "ZipName" in gdf_merged.columns:
-            name_lookup = (
-                gdf_merged[["ZIP", "ZipName"]]
-                .drop_duplicates()
-            )
-            name_lookup["ZIP"] = name_lookup["ZIP"].astype(str)
-            zipname_by_zip = dict(zip(name_lookup["ZIP"], name_lookup["ZipName"]))
-
-        map_data_archetype = []
-        for z in map_data:
-            zip_code = str(z["zip"])
-            archetype = archetype_by_zip.get(zip_code)
-            if archetype is None:
-                continue
-            map_data_archetype.append(
-                {
-                    "zip": zip_code,
-                    "zipName": zipname_by_zip.get(zip_code, ""),
-                    "archetype": archetype,
-                    "centroid_lat": z["centroid_lat"],
-                    "centroid_lng": z["centroid_lng"],
-                    "coordinates": z["coordinates"],
-                }
-            )
-
-        st.markdown("---")
-        st.subheader("Neighborhood Archetypes Map")
-
-        if not map_data_archetype:
-            st.info("No ZIPs available for the archetype map with current filters.")
+        year_df = dist_df[dist_df["year"] == selected_year].copy()
+        if year_df.empty:
+            st.warning(f"No ZHVI data available for {selected_year}.")
         else:
-            map_data_json = json.dumps(map_data_archetype)
+            scatter = (
+                alt.Chart(year_df)
+                .mark_circle(opacity=0.8)
+                .encode(
+                    x=alt.X(
+                        "distance_from_loop:Q",
+                        title="Distance from Loop (relative)",
+                    ),
+                    y=alt.Y(
+                        "Zhvi:Q",
+                        title=f"Home value (ZHVI), {selected_year}",
+                        axis=alt.Axis(format="$,.0f"),
+                    ),
+                    size=alt.Size(
+                        "population:Q",
+                        title="Population",
+                        legend=None,
+                        scale=alt.Scale(range=[40, 900]),
+                    ),
+                    color=alt.Color(
+                        "Zhvi:Q",
+                        title="Home value",
+                        scale=alt.Scale(scheme="viridis"),
+                    ),
+                    tooltip=[
+                        "ZIP",
+                        "ZipName",
+                        alt.Tooltip("population:Q", title="Population", format=","),
+                        alt.Tooltip(
+                            "distance_from_loop:Q",
+                            title="Distance from Loop (relative)",
+                            format=".3f",
+                        ),
+                        alt.Tooltip(
+                            "Zhvi:Q",
+                            title="Home value (ZHVI)",
+                            format=",.0f",
+                        ),
+                    ],
+                )
+            )
 
-            html_code = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8" />
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <style>
-        html, body {{
-            margin: 0;
-            padding: 0;
-            font-family: Arial, sans-serif;
-            width: 100%;
-            height: 100%;
-        }}
-        #mapWrapper {{
-            position: relative;
-            width: 100%;
-            height: 520px;
-        }}
-        #archetypeMap {{
-            width: 100%;
-            height: 100%;
-        }}
-        .zip-tooltip {{
-            background-color: white;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            padding: 8px;
-            font-size: 13px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-        }}
-        .legend {{
-            position: absolute;
-            bottom: 20px;
-            right: 10px;
-            background: rgba(255, 255, 255, 0.96);
-            padding: 10px 12px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-            font-size: 12px;
-            z-index: 1000;
-        }}
-        .legend-title {{
-            font-weight: bold;
-            margin-bottom: 6px;
-        }}
-        .legend-item {{
-            display: flex;
-            align-items: center;
-            margin-bottom: 4px;
-        }}
-        .legend-color {{
-            width: 12px;
-            height: 12px;
-            border-radius: 2px;
-            margin-right: 6px;
-        }}
-        /* Remove default blue focus outline on click */
-        .leaflet-container .leaflet-interactive:focus {{
-            outline: none;
-        }}
-        /* Selected ZIP indicator (match main map style) */
-        .selected-zip-indicator {{
-            position: absolute;
-            top: 10px;
-            left: 60px;
-            background: #ff6600;
-            color: white;
-            padding: 10px 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-            z-index: 1000;
-            font-size: 14px;
-            font-weight: bold;
-        }}
-        .selected-zip-indicator .clear-btn {{
-            margin-left: 10px;
-            background: white;
-            color: #ff6600;
-            border: none;
-            border-radius: 3px;
-            padding: 3px 8px;
-            cursor: pointer;
-            font-size: 12px;
-            font-weight: bold;
-        }}
-        .selected-zip-indicator .clear-btn:hover {{
-            background: #ffe0cc;
-        }}
-        .click-instruction {{
-            position: absolute;
-            bottom: 20px;
-            left: 10px;
-            background: rgba(255,255,255,0.95);
-            padding: 8px 12px;
-            border-radius: 5px;
-            font-size: 12px;
-            color: #666;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
-            z-index: 1000;
-        }}
-    </style>
-</head>
-<body>
-    <div id="mapWrapper">
-        <div id="archetypeMap"></div>
+            reg_line = (
+                alt.Chart(year_df)
+                .transform_regression("distance_from_loop", "Zhvi")
+                .mark_line(color="black", strokeDash=[4, 4])
+                .encode(
+                    x="distance_from_loop:Q",
+                    y="Zhvi:Q",
+                )
+            )
 
-        <div class="selected-zip-indicator" id="selectedIndicator" style="display: none;">
-            📍 ZIP: <span id="selectedZipDisplay">-</span>
-            <button class="clear-btn" id="clearSelectionBtn">✕</button>
-            <div id="selectedZipName" style="font-size: 12px; font-weight: normal; margin-top: 4px;"></div>
-            <div id="selectedArchetype" style="font-size: 12px; font-weight: normal;"></div>
-        </div>
+            chart = (scatter + reg_line).properties(height=420)
+            st.altair_chart(chart, use_container_width=True)
 
-        <div class="click-instruction" id="clickInstruction">
-            👆 Click a ZIP to see its archetype. Click outside to clear.
-        </div>
+        st.markdown("### 📉 Correlation over time")
 
-        <div class="legend" id="legend"></div>
-    </div>
-    <script>
-        const mapData = {map_data_json};
+        corr_records = []
+        for year in years_available:
+            df_y = dist_df[dist_df["year"] == year]
+            if (
+                len(df_y) >= 3
+                and df_y["distance_from_loop"].var() > 0
+                and df_y["Zhvi"].var() > 0
+            ):
+                corr_val = df_y["distance_from_loop"].corr(df_y["Zhvi"])
+                corr_records.append({"year": int(year), "corr": float(corr_val)})
 
-        const archetypeColors = {{
-            "High value / safer": "#1a9850",
-            "High value / riskier": "#fee08b",
-            "Lower value / safer": "#91bfdb",
-            "Lower value / riskier": "#d73027"
-        }};
+        if not corr_records:
+            st.info(
+                "Not enough variation by year to compute a stable correlation between distance and home values."
+            )
+        else:
+            corr_df = pd.DataFrame(corr_records)
+            corr_chart = (
+                alt.Chart(corr_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("year:Q", title="Year", axis=alt.Axis(format="d")),
+                    y=alt.Y(
+                        "corr:Q",
+                        title="Correlation (distance vs ZHVI)",
+                        scale=alt.Scale(domain=[-1, 1]),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("year:Q", title="Year", format="d"),
+                        alt.Tooltip("corr:Q", title="Correlation", format=".2f"),
+                    ],
+                )
+            )
 
-        function colorForArchetype(a) {{
-            return archetypeColors[a] || "#999999";
-        }}
+            zero_rule = alt.Chart(corr_df).mark_rule(
+                strokeDash=[4, 4], color="gray"
+            ).encode(y=alt.datum(0))
 
-        let selectedZip = null;
-        let layersByZip = {{}};
+            st.altair_chart(
+                (corr_chart + zero_rule).properties(height=260),
+                use_container_width=True,
+            )
 
-        // Initialize map
-        const map = L.map('archetypeMap', {{
-            scrollWheelZoom: false,
-            doubleClickZoom: false,
-            dragging: true,
-            zoomControl: true,
-            minZoom: 9,
-            maxZoom: 18
-        }}).setView([41.85, -87.65], 11);
-
-        L.tileLayer('https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
-            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-            maxZoom: 19
-        }}).addTo(map);
-
-        const labelLayerGroup = L.layerGroup().addTo(map);
-
-        if (Array.isArray(mapData) && mapData.length > 0) {{
-            const bounds = L.latLngBounds(
-                mapData
-                    .filter(z => typeof z.centroid_lat === 'number' && typeof z.centroid_lng === 'number')
-                    .map(z => [z.centroid_lat, z.centroid_lng])
-            );
-            if (bounds.isValid()) {{
-                map.fitBounds(bounds.pad(0.01));
-                // Zoom in a bit more than the default fit
-                map.setZoom(map.getZoom() + 1);
-            }}
-        }}
-
-        const features = mapData.map(z => ({{
-                type: 'Feature',
-                properties: {{
-                    zip: z.zip,
-                    zipName: z.zipName || '',
-                    archetype: z.archetype
-            }},
-            geometry: {{
-                type: 'Polygon',
-                coordinates: [z.coordinates.map(c => [c[1], c[0]])]
-            }}
-        }}));
-
-        function clearAllHighlights() {{
-            Object.values(layersByZip).forEach(layer => {{
-                if (layer) {{
-                    layer.setStyle({{
-                        weight: 1,
-                        color: '#333',
-                        fillOpacity: 0.8
-                    }});
-                }}
-            }});
-        }}
-
-        function highlightZip(zipCode) {{
-            const layer = layersByZip[zipCode];
-            if (layer) {{
-                layer.setStyle({{
-                    weight: 4,
-                    color: '#ff6600',
-                    fillOpacity: 0.9
-                }});
-                layer.bringToFront();
-            }}
-        }}
-
-        function clearSelection() {{
-            clearAllHighlights();
-            selectedZip = null;
-            document.getElementById('selectedIndicator').style.display = 'none';
-            document.getElementById('clickInstruction').style.display = 'block';
-        }}
-
-        const geoLayer = L.geoJSON({{
-            type: 'FeatureCollection',
-            features: features
-        }}, {{
-            style: function(feature) {{
-                return {{
-                    fillColor: colorForArchetype(feature.properties.archetype),
-                    weight: 1.2,
-                    color: '#555',
-                    fillOpacity: 0.8
-                }};
-            }},
-            onEachFeature: function(feature, layer) {{
-                const p = feature.properties;
-                const zipCode = String(p.zip);
-
-                layersByZip[zipCode] = layer;
-
-                let tooltip = `<b>ZIP: ${{p.zip}}</b>`;
-                if (p.zipName) {{
-                    tooltip += `<br>${{p.zipName}}`;
-                }}
-                tooltip += `<br>${{p.archetype}}`;
-
-                layer.bindTooltip(tooltip, {{
-                    className: 'zip-tooltip',
-                    permanent: false,
-                    direction: 'top',
-                    sticky: true,
-                    opacity: 0.95
-                }});
-
-                layer.on('mouseover', function() {{
-                    if (zipCode !== selectedZip) {{
-                        this.setStyle({{
-                            weight: 3,
-                            color: '#000',
-                            fillOpacity: 0.9
-                        }});
-                    }}
-                    this.bringToFront();
-                }});
-                layer.on('mouseout', function() {{
-                    if (zipCode !== selectedZip) {{
-                        this.setStyle({{
-                            weight: 1,
-                            color: '#333',
-                            fillOpacity: 0.8
-                        }});
-                    }}
-                }});
-
-                layer.on('click', function(e) {{
-                    window._polygonClicked = true;
-                    clearAllHighlights();
-                    selectedZip = zipCode;
-                    highlightZip(zipCode);
-
-                    document.getElementById('selectedZipDisplay').textContent = zipCode;
-                    document.getElementById('selectedZipName').textContent = p.zipName || '';
-                    document.getElementById('selectedArchetype').textContent = p.archetype;
-                    document.getElementById('selectedIndicator').style.display = 'block';
-                    document.getElementById('clickInstruction').style.display = 'none';
-
-                    L.DomEvent.stopPropagation(e);
-                }});
-
-                // ZIP label in the centroid (like main map)
-                const center = layer.getBounds().getCenter();
-                const labelMarker = L.marker(center, {{
-                    icon: L.divIcon({{
-                        className: 'zip-label',
-                        html: `<div style="font-size: 9px; font-weight: bold; color: black; text-align: center; text-shadow: 1px 1px 2px white, -1px -1px 2px white;">${{p.zip}}</div>`,
-                        iconSize: [40, 20],
-                        iconAnchor: [20, 10]
-                    }}),
-                    interactive: false,
-                    keyboard: false
-                }});
-                labelLayerGroup.addLayer(labelMarker);
-            }}
-        }}).addTo(map);
-
-        // Map click to clear selection when clicking outside polygons
-        map.on('click', function() {{
-            setTimeout(function() {{
-                if (!window._polygonClicked) {{
-                    clearSelection();
-                }}
-                window._polygonClicked = false;
-            }}, 50);
-        }});
-
-        document.getElementById('clearSelectionBtn').addEventListener('click', function(e) {{
-            e.stopPropagation();
-            clearSelection();
-        }});
-
-        // Legend
-        const legendEl = document.getElementById('legend');
-        const entries = Object.keys(archetypeColors);
-        legendEl.innerHTML = `
-            <div class="legend-title">Archetypes</div>
-            ${{entries.map(a => `
-                <div class="legend-item">
-                    <span class="legend-color" style="background:${{archetypeColors[a]}}"></span>
-                    <span>${{a}}</span>
-                </div>
-            `).join('')}}
-        `;
-    </script>
-</body>
-</html>
-"""
-            components.html(html_code, height=540, scrolling=False)
+            st.caption(
+                "Negative values mean ZIPs closer to the Loop tend to have higher home values in that year; "
+                "values closer to zero indicate a weaker distance–value relationship."
+            )

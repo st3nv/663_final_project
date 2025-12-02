@@ -5,6 +5,7 @@ import pandas as pd
 import json
 import sys
 import os
+import altair as alt
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -181,8 +182,74 @@ if len(yearly_rates) > 0:
                     f'{safest["rate"]:.2f} crimes per 1,000 residents ({latest_year})',
                     delta_arrow="off"
                 )
+
+    # Top crime types over time
+    if "Primary Type" in crime_df.columns:
+        if selected_zip:
+            crime_scope = crime_df[crime_df["ZIP"] == selected_zip].copy()
+            scope_label = f"ZIP {selected_zip}"
+        else:
+            crime_scope = crime_df.copy()
+            scope_label = "all ZIP codes"
+
+        type_totals = (
+            crime_scope.groupby("Primary Type")["crime_count"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+
+        top_types = type_totals.head(5).index.tolist()
+        crime_top = crime_scope[crime_scope["Primary Type"].isin(top_types)].copy()
+
+        if not crime_top.empty:
+            yearly_type_counts = (
+                crime_top.groupby(["year", "Primary Type"])["crime_count"]
+                .sum()
+                .reset_index()
+            )
+            yearly_type_counts["year"] = yearly_type_counts["year"].astype(int)
+
+            st.markdown("---")
+            st.subheader("🔍 Top 5 Crime Types Over Time")
+            st.caption(
+                f"Showing the five most common primary crime types in {scope_label}."
+            )
+
+            line_chart = (
+                alt.Chart(yearly_type_counts)
+                .mark_line(point=alt.OverlayMarkDef(size=80))
+                .encode(
+                    x=alt.X(
+                        "year:Q",
+                        title="Year",
+                        axis=alt.Axis(format="d"),
+                    ),
+                    y=alt.Y(
+                        "crime_count:Q",
+                        title="Number of crimes",
+                    ),
+                    color=alt.Color(
+                        "Primary Type:N",
+                        title="Crime type",
+                    ),
+                    tooltip=[
+                        alt.Tooltip("year:Q", title="Year", format="d"),
+                        alt.Tooltip(
+                            "Primary Type:N",
+                            title="Primary crime type",
+                        ),
+                        alt.Tooltip(
+                            "crime_count:Q",
+                            title="Crimes",
+                            format=",",
+                        ),
+                    ],
+                )
+                .properties(height=360)
+            )
+
+            st.altair_chart(line_chart, use_container_width=True)
         
 st.markdown("---")
 
 components.html(html_code, height=900, scrolling=False)
-

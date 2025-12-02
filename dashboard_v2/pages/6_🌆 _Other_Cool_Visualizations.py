@@ -926,8 +926,8 @@ st.write(
     "- **Overall score** is a weighted mix of population, safety, and home value scores (weights set in the sidebar)."
 )
 
-tab_bubble, tab_orbit, tab_network = st.tabs(
-    ["Bubble Playground", "Orbit View", "Adjacency Network"]
+tab_bubble, tab_orbit = st.tabs(
+    ["Bubble Playground", "Orbit View"]
 )
 
 with tab_bubble:
@@ -935,6 +935,3 @@ with tab_bubble:
 
 with tab_orbit:
     render_orbit_view()
-
-with tab_network:
-    render_adjacency_network()
