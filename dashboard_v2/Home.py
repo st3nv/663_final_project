@@ -9,6 +9,17 @@ st.set_page_config(
 
 st.title("📌 Chicago Housing and Crime Dashboard")
 
+st.info(
+    """
+To run this dashboard smoothly, install `streamlit-nightly` instead of `streamlit` by running:
+
+```bash
+pip uninstall streamlit
+pip install streamlit-nightly --upgrade
+```
+"""
+)
+
 st.markdown("""
 Welcome to the Chicago Housing and Crime Dashboard! This interactive application allows you to explore:
 
