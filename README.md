@@ -15,7 +15,7 @@ To smoothly run the code in this repository, please follow the steps below:
    pip install streamlit-nightly --upgrade
    ```
 
-3. **Set Up API Key**: The project uses groq api for the chatbot functionality. You need to obtain an API key from [groq](https://console.groq.com/keys) and store it in a file named `key.txt` inside the `dashboard_v2` directory. Make sure to keep this file secure and do not share it publicly.
+3. **Set Up API Key**: The project uses groq api for the chatbot functionality. You need to obtain an **free** API key from [groq](https://console.groq.com/keys) and store it in a file named `key.txt` inside the `dashboard_v2` directory. Make sure to keep this file secure and do not share it publicly.
 
 4. **Run the Streamlit App**: Navigate to the `dashboard_v2` directory and run the Streamlit app using the following command:
    ```
